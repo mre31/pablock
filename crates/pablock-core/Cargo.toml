@@ -1,0 +1,25 @@
+[package]
+name = "pablock-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iota_stronghold = "2.1"
+argon2 = "0.5"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive", "serde"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+fs2 = "0.4"
+walkdir = "2"
+toml = "0.9"
+directories = "6"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

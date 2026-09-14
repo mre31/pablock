@@ -1,0 +1,10 @@
+BEGIN IMMEDIATE;
+CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE profiles(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('secret','template')), UNIQUE(project_id,path));
+CREATE TABLE versions(id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, key TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('set','import','restore','delete')), source TEXT NOT NULL, created_at TEXT NOT NULL, has_value INTEGER NOT NULL CHECK(has_value IN (0,1)));
+CREATE INDEX version_history ON versions(profile_id,key);
+CREATE TABLE variables(profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, key TEXT NOT NULL, current_id TEXT NOT NULL REFERENCES versions(id), updated_at TEXT NOT NULL, PRIMARY KEY(profile_id,key));
+CREATE TABLE template_keys(profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, key TEXT NOT NULL, PRIMARY KEY(profile_id,key));
+CREATE TABLE pending_operations(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+PRAGMA user_version=1;
+COMMIT;
