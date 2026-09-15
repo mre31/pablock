@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { X, LockKeyhole } from 'lucide-react';
+import { X } from 'lucide-react';
 import { errorMessage, type Diff } from '../api';
-export function Brand() { return <div className="brand"><span className="brand-icon"><LockKeyhole size={21}/></span><strong>pablock<span className="brand-dot">.</span></strong></div>; }
+import { AppIcon } from './AppIcon';
+export function Brand() { return <div className="brand"><span className="brand-icon"><AppIcon size={30} /></span><strong>pablock<span className="brand-dot">.</span></strong></div>; }
 export function Modal({title,children,onClose}:{title:string;children:ReactNode;onClose:()=>void}) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(()=>{ const el=dialog.current!; el.showModal(); return ()=>el.close(); },[]);

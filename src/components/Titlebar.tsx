@@ -1,4 +1,5 @@
-import { Minus, Square, X, Lock } from 'lucide-react';
+import { Minus, Square, X } from 'lucide-react';
+import { AppIcon } from './AppIcon';
 
 export function Titlebar() {
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -35,7 +36,7 @@ export function Titlebar() {
       {isTauri && <WindowResizeHandles />}
       <div className="window-titlebar" data-tauri-drag-region>
         <div className="titlebar-left" data-tauri-drag-region>
-          <Lock size={12} className="titlebar-icon" />
+          <AppIcon size={14} className="titlebar-icon" />
           <span className="titlebar-title">Pablock</span>
         </div>
 

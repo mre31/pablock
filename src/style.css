@@ -119,6 +119,8 @@ a {
 
 .titlebar-icon {
   color: var(--text-muted);
+  display: block;
+  border-radius: 3px;
 }
 
 .titlebar-title {
@@ -1525,6 +1527,15 @@ input[type="checkbox"], input[type="radio"] {
   font-weight: 600;
   font-size: 18px;
   margin-bottom: 28px;
+}
+
+.brand-icon {
+  display: inline-flex;
+}
+
+.brand-icon img {
+  display: block;
+  border-radius: 8px;
 }
 
 .auth-panel {
