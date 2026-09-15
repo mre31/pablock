@@ -1,8 +1,8 @@
 import { useState, useImperativeHandle, forwardRef, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { Plus, Pencil, Trash2, History, ScanLine } from 'lucide-react';
-import { api, type Profile, type Variable, type Version } from '../api';
+import { Plus, Pencil, Trash2, History, ScanLine, GitCompare, ChevronDown, FileText, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { api, type Profile, type Variable, type Version, type Comparison } from '../api';
 import { Confirm, date, ErrorNotice, Modal, Rename } from './common';
 import { ImportDialog, ExportDialog } from './Transfer';
 import { CypherSecret } from './CypherSecret';
@@ -259,8 +259,8 @@ export const ProjectPage = forwardRef<ProjectPageHandle, ProjectPageProps>(funct
       </section>
 
       <ErrorNotice error={comparisons.error}/>
-      {selected?.kind==='template' && <p className="help">Template values are never stored. Scan or import again to refresh key names.</p>}
-      {!!comparisons.data?.length && <details className="template-check"><summary>Template comparison</summary>{comparisons.data.map(c=><div key={c.template}><code>{c.template}</code><p className="warning">Missing ({c.missing.length}): {c.missing.join(', ')||'None'}</p><p>Extra ({c.extra.length}): {c.extra.join(', ')||'None'}</p></div>)}</details>}
+      {selected?.kind==='template' && <p className="help" style={{ margin: '0 32px 16px 32px' }}>Template values are never stored. Scan or import again to refresh key names.</p>}
+      {!!comparisons.data?.length && <TemplateComparison comparisons={comparisons.data} />}
       {dialog?.type==='rename' && selected && <Rename title="Rename profile" initial={selected.name} onClose={()=>setDialog(null)} onSave={async name=>{await api('rename_profile',{profile:selected.id,name});await refresh();}}/>}
       {dialog?.type==='delete_profile' && selected && <Confirm title="Delete profile?" description="This permanently deletes all values and versions in this profile. Source files stay on disk." onClose={()=>setDialog(null)} onConfirm={async()=>{await api('remove_profile',{profile:selected.id});setParams({});await refresh();}}/>}
       {/* Dialogs */}
@@ -608,3 +608,117 @@ function HistoryRow({
     </div>
   );
 }
+
+function TemplateComparison({ comparisons }: { comparisons: Comparison[] }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const totalMissing = comparisons.reduce((sum, c) => sum + c.missing.length, 0);
+
+  return (
+    <div className="template-comparison-panel">
+      <button
+        type="button"
+        className="template-comparison-header"
+        onClick={() => setIsOpen(!isOpen)}
+        aria-expanded={isOpen}
+      >
+        <div className="template-comparison-header-left">
+          <GitCompare size={15} className="template-header-icon" />
+          <span className="template-comparison-title">Template comparison</span>
+          {totalMissing > 0 ? (
+            <span className="comparison-badge warning">
+              <AlertTriangle size={12} />
+              <span>{totalMissing} missing</span>
+            </span>
+          ) : (
+            <span className="comparison-badge success">
+              <CheckCircle2 size={12} />
+              <span>In sync</span>
+            </span>
+          )}
+          <span className="comparison-template-count">
+            {comparisons.length} {comparisons.length === 1 ? 'template' : 'templates'}
+          </span>
+        </div>
+        <div className="template-comparison-header-right">
+          <ChevronDown
+            size={16}
+            className={`template-chevron ${isOpen ? 'is-open' : ''}`}
+          />
+        </div>
+      </button>
+
+      {isOpen && (
+        <div className="template-comparison-content">
+          {comparisons.map(c => {
+            const hasMissing = c.missing.length > 0;
+            const hasExtra = c.extra.length > 0;
+
+            return (
+              <div key={c.template} className="template-item">
+                <div className="template-item-top">
+                  <div className="template-file-info">
+                    <FileText size={13} className="template-file-icon" />
+                    <code className="template-path">{c.template}</code>
+                  </div>
+                  <div className="template-status-pills">
+                    {hasMissing ? (
+                      <span className="pill-status missing">
+                        {c.missing.length} missing
+                      </span>
+                    ) : (
+                      <span className="pill-status sync">
+                        All keys present
+                      </span>
+                    )}
+                    {hasExtra && (
+                      <span className="pill-status extra">
+                        {c.extra.length} extra
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="template-diff-body">
+                  <div className="template-diff-row">
+                    <span className="diff-label missing-label">
+                      Missing ({c.missing.length}):
+                    </span>
+                    {hasMissing ? (
+                      <div className="diff-chips">
+                        {c.missing.map(key => (
+                          <span key={key} className="key-chip missing">
+                            {key}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="diff-none">None</span>
+                    )}
+                  </div>
+
+                  <div className="template-diff-row">
+                    <span className="diff-label extra-label">
+                      Extra ({c.extra.length}):
+                    </span>
+                    {hasExtra ? (
+                      <div className="diff-chips">
+                        {c.extra.map(key => (
+                          <span key={key} className="key-chip extra">
+                            {key}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="diff-none">None</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+

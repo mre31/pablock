@@ -24,6 +24,7 @@ import ProjectPage, { type ProjectPageHandle } from './components/ProjectPage';
 import { ImportDialog, ExportDialog } from './components/Transfer';
 import { Titlebar } from './components/Titlebar';
 import { ScanDialog } from './components/ScanDialog';
+import { triggerCipherFadeOut } from './utils/cipherAnimation';
 
 export default function App() {
   const query = useQuery({ queryKey: ['status'], queryFn: () => api('status', {}) });
@@ -42,8 +43,18 @@ export default function App() {
   const [searchFilter, setSearchFilter] = useState('');
   const [scanDialogData, setScanDialogData] = useState<{ projectId: string; profiles: Profile[] } | null>(null);
 
+  const [isLocking, setIsLocking] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pablock_sidebar_width');
+      return saved ? Math.max(180, Math.min(480, Number(saved))) : 260;
+    } catch {
+      return 260;
+    }
+  });
   const searchInputRef = useRef<HTMLInputElement>(null);
   const projectPageRef = useRef<ProjectPageHandle>(null);
+  const layoutRef = useRef<HTMLDivElement>(null);
 
   // Extract projectId from pathname
   const projectMatch = location.pathname.match(/^\/project\/([^/]+)/);
@@ -98,7 +109,12 @@ export default function App() {
   }
 
   async function lock() {
+    if (isLocking) return;
+    setIsLocking(true);
     try {
+      if (layoutRef.current) {
+        await triggerCipherFadeOut(layoutRef.current);
+      }
       await api('lock', {});
       setSettings(false);
       setAddProject(false);
@@ -111,6 +127,8 @@ export default function App() {
       await client.invalidateQueries();
     } catch (e) {
       setError(e);
+    } finally {
+      setIsLocking(false);
     }
   }
 
@@ -178,12 +196,36 @@ export default function App() {
     }
   };
 
+  const handleSidebarResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const newWidth = Math.max(180, Math.min(500, startW + (moveEvent.clientX - startX)));
+      setSidebarWidth(newWidth);
+      try {
+        localStorage.setItem('pablock_sidebar_width', String(newWidth));
+      } catch {
+        // ignore
+      }
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
   return (
     <div className="app-container">
       <Titlebar />
-      <div className="app-layout">
+      <div className="app-layout" ref={layoutRef}>
       {/* Sol Panel: Nested Sidebar */}
-      <aside className="sidebar">
+      <aside className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
         <div className="sidebar-header">
           <Link to="/" className="sidebar-title">Projects</Link>
           <button
@@ -225,6 +267,14 @@ export default function App() {
           </button>
         </div>
       </aside>
+
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        onMouseDown={handleSidebarResizeMouseDown}
+      />
 
       {/* Ana İçerik Alanı */}
       <main className="main-content">
@@ -278,13 +328,14 @@ export default function App() {
             </button>
 
             <button
-              className="nav-btn"
+              className={`nav-btn ${isLocking ? 'is-locking' : ''}`}
               type="button"
               aria-label="Lock vault"
+              disabled={isLocking}
               onClick={() => void lock()}
             >
               <Lock size={14} />
-              <span>Lock</span>
+              <span>{isLocking ? 'Locking…' : 'Lock'}</span>
             </button>
           </div>
         </header>

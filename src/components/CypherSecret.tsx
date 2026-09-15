@@ -4,12 +4,45 @@ import { api, errorMessage } from '../api';
 
 const GLYPHS = '0123456789abcdefABCDEF!@#$%^&*()_+-=[]{}|;:,.<>?';
 const MASK_DOTS = '••••••••••••••';
-const MAX_VISIBLE_CHARS = 28;
+function calculateMaxVisibleChars(el: HTMLElement | null): number {
+  if (!el) return 80;
 
-function formatSecretDisplay(text: string, max = MAX_VISIBLE_CHARS): string {
+  // Measure from the table container to prevent circular min-content width locking:
+  const tableWrapper = el.closest('.table-wrapper') || el.closest('.variables-panel');
+  const tr = el.closest('tr');
+
+  if (tableWrapper && tr) {
+    const wrapperWidth = tableWrapper.getBoundingClientRect().width;
+    if (wrapperWidth > 0) {
+      const keyCell = tr.querySelector('.cell-key');
+      const keyWidth = keyCell ? keyCell.getBoundingClientRect().width : Math.max(160, wrapperWidth * 0.22);
+      // Fixed column widths: modified (155px), actions (115px)
+      const fixedWidths = 155 + 115;
+      // Account for cell paddings (~40px) + action buttons & gaps (~75px) + safety buffer (15px)
+      const availableWidth = wrapperWidth - keyWidth - fixedWidths - 130;
+      // Monospace 13px character width is approx 7.8px
+      const chars = Math.floor(Math.max(120, availableWidth) / 7.8);
+      return Math.max(24, chars);
+    }
+  }
+
+  const cell = el.closest('td') || el.parentElement;
+  if (cell) {
+    const cellWidth = cell.getBoundingClientRect().width;
+    if (cellWidth > 0) {
+      const availableWidth = Math.max(120, cellWidth - 120);
+      return Math.max(24, Math.floor(availableWidth / 7.8));
+    }
+  }
+
+  return 80;
+}
+
+function formatSecretDisplay(text: string, max: number): string {
   if (text.length <= max) return text;
-  const startLength = 12;
-  const endLength = 9;
+  const remaining = Math.max(6, max - 3);
+  const startLength = Math.ceil(remaining * 0.6);
+  const endLength = Math.floor(remaining * 0.4);
   return `${text.slice(0, startLength)}...${text.slice(-endLength)}`;
 }
 
@@ -42,6 +75,42 @@ export function CypherSecret({ profileId, variableKey, hasValue, isTemplate }: C
     };
   }, []);
 
+  useEffect(() => {
+    if (!isRevealed) return;
+
+    const updateDisplay = () => {
+      const el = textRef.current;
+      const secret = fullSecretRef.current;
+      if (!el || secret === null || animRef.current !== null) return;
+      const maxChars = calculateMaxVisibleChars(el);
+      const displayText = formatSecretDisplay(secret, maxChars);
+      if (el.textContent !== displayText) {
+        el.textContent = displayText;
+        el.setAttribute('title', secret);
+      }
+    };
+
+    const scheduleUpdate = () => {
+      updateDisplay();
+    };
+
+    scheduleUpdate();
+
+    window.addEventListener('resize', scheduleUpdate);
+
+    let observer: ResizeObserver | null = null;
+    const tableWrapper = textRef.current?.closest('.table-wrapper') || textRef.current?.closest('.variables-panel') || document.querySelector('.main-content');
+    if (typeof ResizeObserver !== 'undefined' && tableWrapper) {
+      observer = new ResizeObserver(scheduleUpdate);
+      observer.observe(tableWrapper);
+    }
+
+    return () => {
+      window.removeEventListener('resize', scheduleUpdate);
+      if (observer) observer.disconnect();
+    };
+  }, [isRevealed]);
+
   if (!hasValue) {
     return (
       <span className="secret-text masked-dots text-muted">
@@ -58,7 +127,8 @@ export function CypherSecret({ profileId, variableKey, hasValue, isTemplate }: C
 
     if (animRef.current) clearInterval(animRef.current);
 
-    const displayText = formatSecretDisplay(fullSecret);
+    const maxChars = calculateMaxVisibleChars(el);
+    const displayText = formatSecretDisplay(fullSecret, maxChars);
     const duration = reduceMotion ? 10 : 380;
     const startLength = el.textContent?.length || MASK_DOTS.length;
     const targetLength = displayText.length;
