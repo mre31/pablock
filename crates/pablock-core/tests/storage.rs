@@ -235,6 +235,7 @@ fn every_journal_phase_recovers_additions_and_deletions() {
         FaultPoint::TemporarySnapshot,
         FaultPoint::Snapshot,
         FaultPoint::Metadata,
+        FaultPoint::MetadataTransaction,
     ] {
         let mut f = Fixture::new();
         f.vault.inject_failure(point);
@@ -242,7 +243,10 @@ fn every_journal_phase_recovers_additions_and_deletions() {
         assert!(f.vault.projects().is_err());
         drop(f.vault);
         let mut v = Vault::open(f.data.path(), pw(), false).unwrap();
-        let committed = matches!(point, FaultPoint::Snapshot | FaultPoint::Metadata);
+        let committed = matches!(
+            point,
+            FaultPoint::Snapshot | FaultPoint::Metadata | FaultPoint::MetadataTransaction
+        );
         assert_eq!(
             &*v.reveal(&f.profile, "A", None).unwrap(),
             if committed {
@@ -314,4 +318,227 @@ fn project_selection_names_paths_and_marker() {
         .vault
         .add_project(Path::new("/path/does/not/exist"), None)
         .is_err());
+}
+
+#[test]
+fn previews_pin_import_values_and_reject_stale_exports() {
+    let mut f = Fixture::new();
+    fs::write(f.project.path().join(".env"), "A=previewed\n").unwrap();
+    let import = f
+        .vault
+        .prepare_import(&f.pid, &[".env".into()], false)
+        .unwrap();
+    fs::write(f.project.path().join(".env"), "A=edited-after-preview\n").unwrap();
+    f.vault.import_prepared(import).unwrap();
+    assert_eq!(
+        &*f.vault.reveal(&f.profile, "A", None).unwrap(),
+        "previewed"
+    );
+    let export = f.vault.prepare_export(&f.profile, None).unwrap();
+    fs::write(f.project.path().join(".env"), "A=external-change\n").unwrap();
+    assert!(matches!(
+        f.vault.export_prepared(export, true),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(f.project.path().join(".env")).unwrap(),
+        "A=external-change\n"
+    );
+    let export = f.vault.prepare_export(&f.profile, Some("new.env")).unwrap();
+    fs::write(f.project.path().join("new.env"), "unreviewed-file").unwrap();
+    assert!(matches!(
+        f.vault.export_prepared(export, true),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(f.project.path().join("new.env")).unwrap(),
+        "unreviewed-file"
+    );
+    let import = f
+        .vault
+        .prepare_import(&f.pid, &[".env".into()], false)
+        .unwrap();
+    f.vault
+        .set(&f.profile, "A", secret("changed-in-vault"))
+        .unwrap();
+    assert!(matches!(
+        f.vault.import_prepared(import),
+        Err(Error::Conflict(_))
+    ));
+}
+#[test]
+fn discovery_has_no_side_effects_and_registration_honors_selection() {
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut v = Vault::open(data.path(), pw(), true).unwrap();
+    let p = v.add_project(project.path(), None).unwrap();
+    fs::write(project.path().join(".env"), "A=secret").unwrap();
+    fs::write(project.path().join(".env.local"), "B=secret").unwrap();
+    assert_eq!(v.discover(&p.id).unwrap().len(), 2);
+    assert!(v.profiles(&p.id).unwrap().is_empty());
+    let profiles = v.register_profiles(&p.id, &[".env".into()]).unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert!(v.variables(&profiles[0].id).unwrap().is_empty());
+}
+#[test]
+fn rekey_after_rename_recovers_with_new_password() {
+    let mut f = Fixture::new();
+    f.vault.inject_failure(FaultPoint::Snapshot);
+    assert!(f
+        .vault
+        .change_password(pw(), secret("new password"))
+        .is_err());
+    drop(f.vault);
+    assert!(matches!(
+        Vault::open(f.data.path(), pw(), false),
+        Err(Error::Authentication)
+    ));
+    let v = Vault::open(f.data.path(), secret("new password"), false).unwrap();
+    assert_eq!(
+        &*v.reveal(&f.profile, "A", None).unwrap(),
+        "original-secret"
+    );
+}
+#[test]
+fn ipc_requires_unlock_and_matching_preview_without_leaking_values() {
+    use pablock_core::api::{Request, Session};
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut session = Session::new(data.path().to_path_buf());
+    assert!(matches!(
+        session.handle(Request::Projects),
+        Err(Error::Locked)
+    ));
+    session.handle(Request::Init { password: pw() }).unwrap();
+    let p = session
+        .handle(Request::AddProject {
+            path: project.path().to_string_lossy().into_owned(),
+            name: None,
+        })
+        .unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+    fs::write(project.path().join(".env"), "TOKEN=ipc-private-value\n").unwrap();
+    assert!(matches!(
+        session.handle(Request::Import {
+            project: pid.clone(),
+            files: vec![".env".into()],
+            replace: false
+        }),
+        Err(Error::Conflict(_))
+    ));
+    let preview = session
+        .handle(Request::PreviewImport {
+            project: pid.clone(),
+            files: vec![".env".into()],
+            replace: false,
+        })
+        .unwrap();
+    assert!(!preview.to_string().contains("ipc-private-value"));
+    session
+        .handle(Request::Import {
+            project: pid.clone(),
+            files: vec![".env".into()],
+            replace: false,
+        })
+        .unwrap();
+    let profiles = session.handle(Request::Profiles { project: pid }).unwrap();
+    let profile = profiles[0]["id"].as_str().unwrap().to_string();
+    assert!(!session
+        .handle(Request::Variables {
+            profile: profile.clone()
+        })
+        .unwrap()
+        .to_string()
+        .contains("ipc-private-value"));
+    assert_eq!(
+        session
+            .handle(Request::Reveal {
+                profile: profile.clone(),
+                key: "TOKEN".into(),
+                version: None
+            })
+            .unwrap(),
+        "ipc-private-value"
+    );
+    session.handle(Request::Lock).unwrap();
+    assert!(matches!(
+        session.handle(Request::Reveal {
+            profile,
+            key: "TOKEN".into(),
+            version: None
+        }),
+        Err(Error::Locked)
+    ));
+}
+
+#[test]
+fn snapshot_contains_only_versions_and_project_delete_removes_them() {
+    use iota_stronghold::{KeyProvider, SnapshotPath, Stronghold};
+    fn records(dir: &Path) -> Vec<Vec<u8>> {
+        let mut bytes = Zeroizing::new(vec![0u8; 32]);
+        let params = argon2::Params::new(65536, 3, 1, Some(32)).unwrap();
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+            .hash_password_into(
+                pw().as_bytes(),
+                &fs::read(dir.join("salt")).unwrap(),
+                &mut bytes,
+            )
+            .unwrap();
+        let key = KeyProvider::try_from(bytes).unwrap();
+        let sh = Stronghold::default();
+        let client = sh
+            .load_client_from_snapshot(
+                b"pablock-v1",
+                &key,
+                &SnapshotPath::from_path(dir.join("pablock.hold")),
+            )
+            .unwrap();
+        let keys = client.store().keys().unwrap();
+        for k in &keys {
+            if k.as_slice() != b"__commit" {
+                let value = Zeroizing::new(client.store().get(k).unwrap().unwrap());
+                assert!(!value.windows(19).any(|b| b == b"never-save-template"));
+            }
+        }
+        sh.clear().unwrap();
+        keys
+    }
+    let mut f = Fixture::new();
+    fs::write(
+        f.project.path().join(".env.example"),
+        "KEY=never-save-template",
+    )
+    .unwrap();
+    f.vault
+        .import(&f.pid, &[".env.example".into()], false)
+        .unwrap();
+    drop(f.vault);
+    assert_eq!(records(f.data.path()).len(), 3); // Two imported values and the commit marker.
+    let mut v = Vault::open(f.data.path(), pw(), false).unwrap();
+    v.remove_project(&f.pid).unwrap();
+    drop(v);
+    assert_eq!(records(f.data.path()), vec![b"__commit".to_vec()]);
+}
+
+#[test]
+fn init_does_not_replace_salt_when_existing_snapshot_is_missing() {
+    let f = Fixture::new();
+    drop(f.vault);
+    let salt = fs::read(f.data.path().join("salt")).unwrap();
+    fs::rename(
+        f.data.path().join("pablock.hold"),
+        f.data.path().join("saved.hold"),
+    )
+    .unwrap();
+    assert!(matches!(
+        Vault::open(f.data.path(), secret("different"), true),
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(fs::read(f.data.path().join("salt")).unwrap(), salt);
+    fs::rename(
+        f.data.path().join("saved.hold"),
+        f.data.path().join("pablock.hold"),
+    )
+    .unwrap();
+    assert!(Vault::open(f.data.path(), pw(), false).is_ok());
 }

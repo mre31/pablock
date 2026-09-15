@@ -1,3 +1,4 @@
+use crate::vault::{PreparedExport, PreparedImport};
 use crate::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -33,6 +34,13 @@ pub enum Request {
     },
     Scan {
         project: String,
+    },
+    Discover {
+        project: String,
+    },
+    RegisterProfiles {
+        project: String,
+        paths: Vec<String>,
     },
     Profiles {
         project: String,
@@ -118,10 +126,17 @@ impl From<Error> for ApiError {
 pub struct Session {
     pub dir: PathBuf,
     vault: Option<Vault>,
+    import_preview: Option<PreparedImport>,
+    export_preview: Option<PreparedExport>,
 }
 impl Session {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, vault: None }
+        Self {
+            dir,
+            vault: None,
+            import_preview: None,
+            export_preview: None,
+        }
     }
     fn vault(&mut self) -> Result<&mut Vault> {
         self.vault.as_mut().ok_or(Error::Locked)
@@ -149,12 +164,13 @@ impl Session {
                 serde_json::Value::Null
             }
             Lock => {
+                self.import_preview = None;
+                self.export_preview = None;
                 self.vault = None;
                 serde_json::Value::Null
             }
             Password { current, new } => {
-                self.vault()?
-                    .change_password(current, new)?;
+                self.vault()?.change_password(current, new)?;
                 serde_json::Value::Null
             }
             Projects => serde_json::to_value(self.vault()?.projects()?)?,
@@ -171,6 +187,10 @@ impl Session {
                 serde_json::Value::Null
             }
             Scan { project } => serde_json::to_value(self.vault()?.scan(&project)?)?,
+            Discover { project } => serde_json::to_value(self.vault()?.discover(&project)?)?,
+            RegisterProfiles { project, paths } => {
+                serde_json::to_value(self.vault()?.register_profiles(&project, &paths)?)?
+            }
             Profiles { project } => serde_json::to_value(self.vault()?.profiles(&project)?)?,
             RenameProfile { profile, name } => {
                 self.vault()?.rename_profile(&profile, &name)?;
@@ -230,24 +250,60 @@ impl Session {
                 project,
                 files,
                 replace,
-            } => serde_json::to_value(self.vault()?.preview_import(&project, &files, replace)?)?,
+            } => {
+                self.import_preview = None;
+                let prepared = self.vault()?.prepare_import(&project, &files, replace)?;
+                let result = serde_json::to_value(&prepared.previews)?;
+                self.import_preview = Some(prepared);
+                result
+            }
             Import {
                 project,
                 files,
                 replace,
-            } => serde_json::to_value(self.vault()?.import(&project, &files, replace)?)?,
+            } => {
+                let prepared = self.import_preview.take().ok_or_else(|| {
+                    Error::Conflict("Preview the import before confirming".into())
+                })?;
+                if prepared.project != project
+                    || prepared.files != files
+                    || prepared.replace != replace
+                {
+                    return Err(Error::Conflict(
+                        "Import selection changed; preview again".into(),
+                    ));
+                }
+                serde_json::to_value(self.vault()?.import_prepared(prepared)?)?
+            }
             Diff { profile, target } => {
-                serde_json::to_value(self.vault()?.disk_diff(&profile, target.as_deref())?)?
+                self.export_preview = None;
+                let prepared = self.vault()?.prepare_export(&profile, target.as_deref())?;
+                let result = serde_json::to_value(&prepared.diff)?;
+                self.export_preview = Some(prepared);
+                result
             }
             Export {
                 profile,
                 target,
                 overwrite,
-            } => serde_json::to_value(self.vault()?.export(
-                &profile,
-                target.as_deref(),
-                overwrite,
-            )?)?,
+            } => {
+                let prepared = self
+                    .export_preview
+                    .take()
+                    .ok_or_else(|| Error::Conflict("Compare with disk before exporting".into()))?;
+                if prepared.profile != profile || prepared.target != target {
+                    return Err(Error::Conflict(
+                        "Export target changed; compare again".into(),
+                    ));
+                }
+                if prepared.destination_exists() && !overwrite {
+                    self.export_preview = Some(prepared);
+                    return Err(Error::Conflict(
+                        "Confirm overwriting the destination".into(),
+                    ));
+                }
+                serde_json::to_value(self.vault()?.export_prepared(prepared, overwrite)?)?
+            }
         };
         Ok(value)
     }

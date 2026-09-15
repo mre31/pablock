@@ -189,7 +189,27 @@ fn new_password(stdin: &mut impl BufRead, piped: bool) -> Result<Zeroizing<Strin
     }
 }
 pub fn run() -> i32 {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let _ = error.print();
+                return 0;
+            }
+            // Never echo a mistakenly supplied secret argument into an error or log.
+            let message =
+                "Invalid command or arguments; use pablock --help or the subcommand's --help";
+            if std::env::args_os().any(|a| a == "--json") {
+                eprintln!("{}", json!({"error":{"code":2,"message":message}}));
+            } else {
+                eprintln!("Error: {message}");
+            }
+            return 2;
+        }
+    };
     match execute(&cli) {
         Ok(v) => {
             if cli.json {
@@ -213,6 +233,19 @@ pub fn run() -> i32 {
     }
 }
 fn execute(cli: &Cli) -> Result<Value> {
+    // AppImage's AppRun changes into its bundled usr directory. The runtime
+    // preserves the caller's working directory in OWD for command-line tools.
+    if let (Some(_), Some(appdir), Some(original)) = (
+        std::env::var_os("APPIMAGE"),
+        std::env::var_os("APPDIR"),
+        std::env::var_os("OWD"),
+    ) {
+        // AppImage variables can be inherited from a terminal/editor packaged
+        // as AppImage. Only our own bundled executable should restore OWD.
+        if std::env::current_exe()?.starts_with(Path::new(&appdir)) {
+            std::env::set_current_dir(original)?;
+        }
+    }
     let dir = Vault::data_dir()?;
     if matches!(
         cli.command,
@@ -313,10 +346,10 @@ fn execute(cli: &Cli) -> Result<Value> {
                 })
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
-            let preview = vault.preview_import(&project.id, &files, *replace)?;
-            eprintln!("{}", serde_json::to_string_pretty(&preview)?);
+            let prepared = vault.prepare_import(&project.id, &files, *replace)?;
+            eprintln!("{}", serde_json::to_string_pretty(&prepared.previews)?);
             confirmed(*yes, "Import these changes into the vault?")?;
-            return serial(vault.import(&project.id, &files, *replace)?);
+            return serial(vault.import_prepared(prepared)?);
         }
         _ => (),
     }
@@ -350,17 +383,13 @@ fn execute(cli: &Cli) -> Result<Value> {
         }
         Command::Export { to, yes } => {
             let target = absolute_target(to);
-            let diff = vault.disk_diff(&profile.id, target.as_deref())?;
-            eprintln!("{}", serde_json::to_string_pretty(&diff)?);
-            let path = target
-                .as_deref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| Path::new(&project.root).join(&profile.path));
-            let exists = path.exists();
+            let prepared = vault.prepare_export(&profile.id, target.as_deref())?;
+            eprintln!("{}", serde_json::to_string_pretty(&prepared.diff)?);
+            let exists = prepared.destination_exists();
             if exists {
                 confirmed(*yes,"Overwrite this file? Writing is direct and existing permissions are preserved.")?;
             }
-            return serial(vault.export(&profile.id, target.as_deref(), exists || *yes)?);
+            return serial(vault.export_prepared(prepared, exists || *yes)?);
         }
         Command::Secret { command } => match command {
             SecretCommand::List => {

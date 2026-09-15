@@ -1,1 +1,1 @@
-{"root":["./src/App.test.tsx","./src/App.tsx","./src/api.ts","./src/main.tsx","./src/test-setup.ts","./src/components/ProjectPage.tsx","./src/components/Transfer.tsx","./src/components/common.tsx","./vite.config.ts"],"version":"5.9.3"}
+{"root":["./src/App.test.tsx","./src/App.tsx","./src/api.ts","./src/main.tsx","./src/test-setup.ts","./src/components/CypherSecret.tsx","./src/components/ProjectPage.tsx","./src/components/ScanDialog.tsx","./src/components/Titlebar.tsx","./src/components/Transfer.tsx","./src/components/common.tsx","./vite.config.ts"],"version":"5.9.3"}

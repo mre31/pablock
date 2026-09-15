@@ -164,6 +164,9 @@ pub fn parse(input: &str) -> Result<Parsed> {
     Ok(out)
 }
 pub fn encode(values: &BTreeMap<String, String>) -> String {
+    if values.is_empty() {
+        return "\n".into();
+    }
     let mut out = String::new();
     for (k, v) in values {
         out.push_str(k);
@@ -210,6 +213,7 @@ mod tests {
     }
     #[test]
     fn canonical_roundtrip() {
+        assert_eq!(encode(&BTreeMap::new()), "\n");
         let p = parse("Z='a\nb'\r\nA=\"quote\\\"\\\\\\t\\r${x}\"\nEMPTY=\n").unwrap();
         let encoded = encode(&p.values);
         assert!(encoded.starts_with("A="));

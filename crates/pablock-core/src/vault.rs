@@ -55,6 +55,7 @@ pub enum FaultPoint {
     TemporarySnapshot,
     Snapshot,
     Metadata,
+    MetadataTransaction,
 }
 #[derive(Serialize, Deserialize)]
 struct Statement {
@@ -132,6 +133,24 @@ impl Vault {
             ));
         }
         let salt_path = dir.join("salt");
+        if initialize && dir.join("pablock.db").exists() {
+            let previous = Connection::open_with_flags(
+                dir.join("pablock.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let has_projects: bool = previous.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects')",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_projects
+                && previous
+                    .query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))?
+                    > 0
+            {
+                return Err(Error::Conflict("Metadata already exists but its snapshot is missing. Restore the matching vault files before opening it.".into()));
+            }
+        }
         if initialize {
             if password.is_empty() {
                 return Err(Error::Usage("Password cannot be empty".into()));
@@ -241,6 +260,12 @@ impl Vault {
             tx.execute(&s.sql, rusqlite::params_from_iter(s.args.iter()))?;
         }
         tx.execute("DELETE FROM pending_operations WHERE id=?1", [&op.id])?;
+        if self.fault == Some(FaultPoint::MetadataTransaction) {
+            self.fault = None;
+            return Err(Error::Io(
+                "Simulated interruption before SQLite commit".into(),
+            ));
+        }
         tx.commit()?;
         Ok(())
     }
@@ -337,6 +362,7 @@ impl Vault {
         let replacement = key(new, &salt)?;
         self.poisoned = true;
         self.persist(Some(&replacement))?;
+        self.checkpoint(FaultPoint::Snapshot)?;
         self.key = replacement;
         self.poisoned = false;
         Ok(())
@@ -518,19 +544,53 @@ impl Vault {
             ],
         )
     }
-    pub fn scan(&mut self, project: &str) -> Result<Vec<Profile>> {
+    pub fn discover(&self, project: &str) -> Result<Vec<Profile>> {
         let p = self.project(project)?;
-        let found = discovery::scan(Path::new(&p.root))?;
+        let current = self.profiles(project)?;
+        Ok(discovery::scan(Path::new(&p.root))?
+            .into_iter()
+            .map(|(path, kind)| {
+                current
+                    .iter()
+                    .find(|p| p.path == path)
+                    .cloned()
+                    .unwrap_or_else(|| Profile {
+                        id: id(),
+                        project_id: project.into(),
+                        name: path.clone(),
+                        path,
+                        kind,
+                    })
+            })
+            .collect())
+    }
+    pub fn scan(&mut self, project: &str) -> Result<Vec<Profile>> {
+        let paths = self
+            .discover(project)?
+            .into_iter()
+            .map(|p| p.path)
+            .collect::<Vec<_>>();
+        self.register_profiles(project, &paths)
+    }
+    pub fn register_profiles(&mut self, project: &str, paths: &[String]) -> Result<Vec<Profile>> {
+        let p = self.project(project)?;
         let current = self.profiles(project)?;
         let mut statements = Vec::new();
-        for (path, kind) in found {
+        let mut seen = BTreeSet::new();
+        for path in paths {
+            let path = discovery::relative(Path::new(&p.root), Path::new(path))?;
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let kind = discovery::classify(Path::new(&path))
+                .ok_or_else(|| Error::Usage("Expected a dotenv profile".into()))?;
             let existing = current.iter().find(|p| p.path == path);
             let pid = existing.map(|p| p.id.clone()).unwrap_or_else(id);
             if existing.is_none() {
                 statements.push(Self::profile_insert(project, &path, &kind, &pid));
             }
             if kind == ProfileKind::Template {
-                let content = Zeroizing::new(fs::read_to_string(Path::new(&p.root).join(&path))?);
+                let content = read_project_file(&p.root, &Path::new(&p.root).join(&path))?;
                 let parsed = dotenv::parse(&content)?;
                 statements.push(stmt(
                     "DELETE FROM template_keys WHERE profile_id=?1",
@@ -764,83 +824,226 @@ impl Vault {
         }
         Ok(out)
     }
-    pub fn prepare_import(&self, project: &str, files: &[String], replace: bool) -> Result<PreparedImport> {
+    pub fn prepare_import(
+        &self,
+        project: &str,
+        files: &[String],
+        replace: bool,
+    ) -> Result<PreparedImport> {
         let p = self.project(project)?;
         let profiles = self.profiles(project)?;
-        let mut previews = Vec::new(); let mut parsed_files = Vec::new(); let mut seen = BTreeSet::new();
-        if files.is_empty() { return Err(Error::Usage("Select at least one dotenv file".into())); }
+        let mut previews = Vec::new();
+        let mut parsed_files = Vec::new();
+        let mut seen = BTreeSet::new();
+        if files.is_empty() {
+            return Err(Error::Usage("Select at least one dotenv file".into()));
+        }
         for file in files {
             let path = discovery::relative(Path::new(&p.root), Path::new(file))?;
-            if !seen.insert(path.clone()) { return Err(Error::Usage("Duplicate import path".into())); }
-            let kind = discovery::classify(Path::new(&path)).ok_or_else(|| Error::Usage("Import expects a .env or .env.* file".into()))?;
+            if !seen.insert(path.clone()) {
+                return Err(Error::Usage("Duplicate import path".into()));
+            }
+            let kind = discovery::classify(Path::new(&path))
+                .ok_or_else(|| Error::Usage("Import expects a .env or .env.* file".into()))?;
             let input = read_project_file(&p.root, &Path::new(&p.root).join(&path))?;
             let mut parsed = dotenv::parse(&input)?;
             let existing = profiles.iter().find(|q| q.path == path);
             let diff = if kind == ProfileKind::Template {
                 // Discard template values immediately, including from the pending preview.
-                for value in parsed.values.values_mut() { value.zeroize(); }
-                let old = existing.map(|q| self.template_keys(&q.id)).transpose()?.unwrap_or_default().into_iter().map(|k| (k,String::new())).collect();
-                ProfileDiff::between(&old,&parsed.values,true)
+                for value in parsed.values.values_mut() {
+                    value.zeroize();
+                }
+                let old = existing
+                    .map(|q| self.template_keys(&q.id))
+                    .transpose()?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|k| (k, String::new()))
+                    .collect();
+                ProfileDiff::between(&old, &parsed.values, true)
             } else {
-                let old = existing.map(|q|self.values(&q.id)).transpose()?.unwrap_or_default();
-                ProfileDiff::between(&old.0,&parsed.values,replace)
+                let old = existing
+                    .map(|q| self.values(&q.id))
+                    .transpose()?
+                    .unwrap_or_default();
+                ProfileDiff::between(&old.0, &parsed.values, replace)
             };
-            previews.push(ImportPreview { path,kind,diff,warnings:parsed.warnings.clone() }); parsed_files.push(parsed);
+            previews.push(ImportPreview {
+                path,
+                kind,
+                diff,
+                warnings: parsed.warnings.clone(),
+            });
+            parsed_files.push(parsed);
         }
-        Ok(PreparedImport { project:project.into(), files:files.to_vec(), replace, revision:sh(self.client.store().get(COMMIT))?, previews, parsed_files })
+        Ok(PreparedImport {
+            project: project.into(),
+            files: files.to_vec(),
+            replace,
+            revision: sh(self.client.store().get(COMMIT))?,
+            previews,
+            parsed_files,
+        })
     }
-    pub fn preview_import(&self, project: &str, files: &[String], replace: bool) -> Result<Vec<ImportPreview>> {
-        Ok(self.prepare_import(project,files,replace)?.previews)
+    pub fn preview_import(
+        &self,
+        project: &str,
+        files: &[String],
+        replace: bool,
+    ) -> Result<Vec<ImportPreview>> {
+        Ok(self.prepare_import(project, files, replace)?.previews)
     }
-    pub fn import(&mut self, project: &str, files: &[String], replace: bool) -> Result<Vec<ImportPreview>> {
-        let prepared=self.prepare_import(project,files,replace)?; self.import_prepared(prepared)
+    pub fn import(
+        &mut self,
+        project: &str,
+        files: &[String],
+        replace: bool,
+    ) -> Result<Vec<ImportPreview>> {
+        let prepared = self.prepare_import(project, files, replace)?;
+        self.import_prepared(prepared)
     }
     pub fn import_prepared(&mut self, prepared: PreparedImport) -> Result<Vec<ImportPreview>> {
         self.ready()?;
-        if sh(self.client.store().get(COMMIT))? != prepared.revision { return Err(Error::Conflict("Vault changed since preview; preview the import again".into())); }
-        let profiles=self.profiles(&prepared.project)?; let mut statements=Vec::new(); let mut puts=Vec::new();
-        for (preview,parsed) in prepared.previews.iter().zip(&prepared.parsed_files) {
-            let existing=profiles.iter().find(|q|q.path==preview.path); let pid=existing.map(|q|q.id.clone()).unwrap_or_else(id);
-            if existing.is_none() { statements.push(Self::profile_insert(&prepared.project,&preview.path,&preview.kind,&pid)); }
-            if preview.kind==ProfileKind::Template {
-                statements.push(stmt("DELETE FROM template_keys WHERE profile_id=?1", &[&pid]));
-                for k in parsed.values.keys() { statements.push(stmt("INSERT INTO template_keys VALUES(?1,?2)",&[&pid,k])); }
+        if sh(self.client.store().get(COMMIT))? != prepared.revision {
+            return Err(Error::Conflict(
+                "Vault changed since preview; preview the import again".into(),
+            ));
+        }
+        let profiles = self.profiles(&prepared.project)?;
+        let mut statements = Vec::new();
+        let mut puts = Vec::new();
+        for (preview, parsed) in prepared.previews.iter().zip(&prepared.parsed_files) {
+            let existing = profiles.iter().find(|q| q.path == preview.path);
+            let pid = existing.map(|q| q.id.clone()).unwrap_or_else(id);
+            if existing.is_none() {
+                statements.push(Self::profile_insert(
+                    &prepared.project,
+                    &preview.path,
+                    &preview.kind,
+                    &pid,
+                ));
+            }
+            if preview.kind == ProfileKind::Template {
+                statements.push(stmt(
+                    "DELETE FROM template_keys WHERE profile_id=?1",
+                    &[&pid],
+                ));
+                for k in parsed.values.keys() {
+                    statements.push(stmt("INSERT INTO template_keys VALUES(?1,?2)", &[&pid, k]));
+                }
             } else {
                 for k in preview.diff.added.iter().chain(&preview.diff.changed) {
-                    let vid=id(); statements.extend(Self::version_statements(&pid,k,&vid,true,"import",&preview.path)); puts.push((vid,Zeroizing::new(parsed.values[k].clone())));
+                    let vid = id();
+                    statements.extend(Self::version_statements(
+                        &pid,
+                        k,
+                        &vid,
+                        true,
+                        "import",
+                        &preview.path,
+                    ));
+                    puts.push((vid, Zeroizing::new(parsed.values[k].clone())));
                 }
-                for k in &preview.diff.removed { statements.extend(Self::version_statements(&pid,k,&id(),false,"delete",&preview.path)); }
+                for k in &preview.diff.removed {
+                    statements.extend(Self::version_statements(
+                        &pid,
+                        k,
+                        &id(),
+                        false,
+                        "delete",
+                        &preview.path,
+                    ));
+                }
             }
         }
-        if !statements.is_empty() { self.commit(statements,puts,vec![])?; } Ok(prepared.previews)
+        if !statements.is_empty() {
+            self.commit(statements, puts, vec![])?;
+        }
+        Ok(prepared.previews)
     }
     fn export_target(&self, profile: &str, target: Option<&str>) -> Result<PathBuf> {
-        let p=self.secret_profile(profile)?; let project=self.project(&p.project_id)?;
-        discovery::checked_path(Path::new(&project.root),Path::new(target.unwrap_or(&p.path)),true)
+        let p = self.secret_profile(profile)?;
+        let project = self.project(&p.project_id)?;
+        discovery::checked_path(
+            Path::new(&project.root),
+            Path::new(target.unwrap_or(&p.path)),
+            true,
+        )
     }
     pub fn prepare_export(&self, profile: &str, target: Option<&str>) -> Result<PreparedExport> {
-        let path=self.export_target(profile,target)?;
-        let root=self.project(&self.profile(profile)?.project_id)?.root;
-        let original=if path.exists() { Some(read_project_file(&root,&path)?) } else { None };
-        let old=dotenv::parse(original.as_deref().map(|s|s.as_str()).unwrap_or(""))?;
-        let values=self.values(profile)?; let diff=ProfileDiff::between(&old.values,&values.0,true);
-        Ok(PreparedExport { profile:profile.into(), target:target.map(str::to_string), root,path,original,content:Zeroizing::new(dotenv::encode(&values.0)),diff,revision:sh(self.client.store().get(COMMIT))? })
+        let path = self.export_target(profile, target)?;
+        let root = self.project(&self.profile(profile)?.project_id)?.root;
+        let original = if path.exists() {
+            Some(read_project_file(&root, &path)?)
+        } else {
+            None
+        };
+        let old = dotenv::parse(original.as_deref().map(|s| s.as_str()).unwrap_or(""))?;
+        let values = self.values(profile)?;
+        let diff = ProfileDiff::between(&old.values, &values.0, true);
+        Ok(PreparedExport {
+            profile: profile.into(),
+            target: target.map(str::to_string),
+            root,
+            path,
+            original,
+            content: Zeroizing::new(dotenv::encode(&values.0)),
+            diff,
+            revision: sh(self.client.store().get(COMMIT))?,
+        })
     }
-    pub fn disk_diff(&self, profile: &str, target: Option<&str>) -> Result<ProfileDiff> { Ok(self.prepare_export(profile,target)?.diff) }
-    pub fn export(&self, profile: &str, target: Option<&str>, overwrite: bool) -> Result<ProfileDiff> { self.export_prepared(self.prepare_export(profile,target)?,overwrite) }
-    pub fn export_prepared(&self, prepared: PreparedExport, overwrite: bool) -> Result<ProfileDiff> {
+    pub fn disk_diff(&self, profile: &str, target: Option<&str>) -> Result<ProfileDiff> {
+        Ok(self.prepare_export(profile, target)?.diff)
+    }
+    pub fn export(
+        &self,
+        profile: &str,
+        target: Option<&str>,
+        overwrite: bool,
+    ) -> Result<ProfileDiff> {
+        self.export_prepared(self.prepare_export(profile, target)?, overwrite)
+    }
+    pub fn export_prepared(
+        &self,
+        prepared: PreparedExport,
+        overwrite: bool,
+    ) -> Result<ProfileDiff> {
         self.ready()?;
-        if sh(self.client.store().get(COMMIT))? != prepared.revision { return Err(Error::Conflict("Vault changed since preview; compare again".into())); }
-        if prepared.original.is_some() && !overwrite { return Err(Error::Conflict("Destination exists; confirmation or --yes is required".into())); }
-        discovery::checked_path(Path::new(&prepared.root),&prepared.path,true)?;
-        let mut file=open_project_file(&prepared.root,&prepared.path,if prepared.original.is_some() { FileMode::Overwrite } else { FileMode::Create })?;
-        if let Some(original)=prepared.original {
-            let mut current=Zeroizing::new(String::new()); file.read_to_string(&mut current)?;
-            if *current!=*original { return Err(Error::Conflict("Destination changed since preview; compare again".into())); }
+        if sh(self.client.store().get(COMMIT))? != prepared.revision {
+            return Err(Error::Conflict(
+                "Vault changed since preview; compare again".into(),
+            ));
         }
-        file.rewind()?; file.set_len(0)?; file.write_all(prepared.content.as_bytes())?; file.sync_all()?; Ok(prepared.diff)
+        if prepared.original.is_some() && !overwrite {
+            return Err(Error::Conflict(
+                "Destination exists; confirmation or --yes is required".into(),
+            ));
+        }
+        discovery::checked_path(Path::new(&prepared.root), &prepared.path, true)?;
+        let mut file = open_project_file(
+            &prepared.root,
+            &prepared.path,
+            if prepared.original.is_some() {
+                FileMode::Overwrite
+            } else {
+                FileMode::Create
+            },
+        )?;
+        if let Some(original) = prepared.original {
+            let mut current = Zeroizing::new(String::new());
+            file.read_to_string(&mut current)?;
+            if *current != *original {
+                return Err(Error::Conflict(
+                    "Destination changed since preview; compare again".into(),
+                ));
+            }
+        }
+        file.rewind()?;
+        file.set_len(0)?;
+        file.write_all(prepared.content.as_bytes())?;
+        file.sync_all()?;
+        Ok(prepared.diff)
     }
-
 }
 fn profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Profile> {
     Ok(Profile {
@@ -874,40 +1077,123 @@ impl Drop for SecretMap {
     }
 }
 pub struct PreparedImport {
-    pub project: String, pub files: Vec<String>, pub replace: bool,
-    revision: Option<Vec<u8>>, pub previews: Vec<ImportPreview>, parsed_files: Vec<dotenv::Parsed>,
+    pub project: String,
+    pub files: Vec<String>,
+    pub replace: bool,
+    revision: Option<Vec<u8>>,
+    pub previews: Vec<ImportPreview>,
+    parsed_files: Vec<dotenv::Parsed>,
 }
 pub struct PreparedExport {
-    pub profile: String, pub target: Option<String>, root: String, path: PathBuf,
-    original: Option<Zeroizing<String>>, content: Zeroizing<String>, pub diff: ProfileDiff, revision: Option<Vec<u8>>,
+    pub profile: String,
+    pub target: Option<String>,
+    root: String,
+    path: PathBuf,
+    original: Option<Zeroizing<String>>,
+    content: Zeroizing<String>,
+    pub diff: ProfileDiff,
+    revision: Option<Vec<u8>>,
 }
-impl PreparedExport { pub fn destination_exists(&self) -> bool { self.original.is_some() } }
-enum FileMode { Read, Overwrite, Create }
+impl PreparedExport {
+    pub fn destination_exists(&self) -> bool {
+        self.original.is_some()
+    }
+}
+enum FileMode {
+    Read,
+    Overwrite,
+    Create,
+}
 fn read_project_file(root: &str, path: &Path) -> Result<Zeroizing<String>> {
-    let mut f=open_project_file(root,path,FileMode::Read)?; let mut text=Zeroizing::new(String::new()); f.read_to_string(&mut text)?; Ok(text)
+    let mut f = open_project_file(root, path, FileMode::Read)?;
+    let mut text = Zeroizing::new(String::new());
+    f.read_to_string(&mut text)?;
+    Ok(text)
 }
 #[cfg(unix)]
 fn open_project_file(root: &str, path: &Path, mode: FileMode) -> Result<File> {
-    use std::os::{fd::{AsRawFd, FromRawFd}, unix::ffi::OsStrExt};
-    let mut parent=File::open(root)?;
-    let rel=path.strip_prefix(root).map_err(|_|Error::Usage("File must stay inside project".into()))?;
-    let parts:Vec<_>=rel.components().collect();
-    for (i,part) in parts.iter().enumerate() {
-        if !matches!(part,std::path::Component::Normal(_)) { return Err(Error::Usage("Path traversal is not allowed".into())); }
-        let name=std::ffi::CString::new(part.as_os_str().as_bytes()).map_err(|_|Error::Usage("Invalid path".into()))?;
-        let last=i+1==parts.len();
-        let flags=libc::O_NOFOLLOW|libc::O_CLOEXEC|if last {libc::O_NONBLOCK|match mode {FileMode::Read=>libc::O_RDONLY,FileMode::Overwrite=>libc::O_RDWR,FileMode::Create=>libc::O_RDWR|libc::O_CREAT|libc::O_EXCL}} else {libc::O_RDONLY|libc::O_DIRECTORY};
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+    let mut parent = File::open("/")?;
+    // A registered canonical root may have been replaced with a symlink later.
+    // Open its complete directory chain without following any link.
+    for component in Path::new(root).components() {
+        if matches!(component, std::path::Component::RootDir) {
+            continue;
+        }
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(Error::Usage("Expected a canonical project root".into()));
+        }
+        let name = std::ffi::CString::new(component.as_os_str().as_bytes())
+            .map_err(|_| Error::Usage("Invalid project root".into()))?;
+        // SAFETY: parent and name live throughout openat; a successful descriptor is owned.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: this successful openat descriptor is transferred exactly once.
+        parent = unsafe { File::from_raw_fd(fd) };
+    }
+    let rel = path
+        .strip_prefix(root)
+        .map_err(|_| Error::Usage("File must stay inside project".into()))?;
+    let parts: Vec<_> = rel.components().collect();
+    for (i, part) in parts.iter().enumerate() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            return Err(Error::Usage("Path traversal is not allowed".into()));
+        }
+        let name = std::ffi::CString::new(part.as_os_str().as_bytes())
+            .map_err(|_| Error::Usage("Invalid path".into()))?;
+        let last = i + 1 == parts.len();
+        let flags = libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | if last {
+                libc::O_NONBLOCK
+                    | match mode {
+                        FileMode::Read => libc::O_RDONLY,
+                        FileMode::Overwrite => libc::O_RDWR,
+                        FileMode::Create => libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    }
+            } else {
+                libc::O_RDONLY | libc::O_DIRECTORY
+            };
         // SAFETY: name and parent are valid for this call. A new descriptor is returned.
-        let fd=unsafe {libc::openat(parent.as_raw_fd(),name.as_ptr(),flags,0o666)};
-        if fd<0 { let e=std::io::Error::last_os_error(); if e.kind()==std::io::ErrorKind::AlreadyExists { return Err(Error::Conflict("Destination appeared since preview; compare again".into())); } return Err(e.into()); }
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, 0o666) };
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                return Err(Error::Conflict(
+                    "Destination appeared since preview; compare again".into(),
+                ));
+            }
+            return Err(e.into());
+        }
         // SAFETY: openat returned an owned valid descriptor, transferred to File exactly once.
-        let file=unsafe {File::from_raw_fd(fd)};
-        if last { if !file.metadata()?.is_file() { return Err(Error::Usage("Expected a regular file".into())); } return Ok(file); } parent=file;
+        let file = unsafe { File::from_raw_fd(fd) };
+        if last {
+            if !file.metadata()?.is_file() {
+                return Err(Error::Usage("Expected a regular file".into()));
+            }
+            return Ok(file);
+        }
+        parent = file;
     }
     Err(Error::Usage("Expected a file".into()))
 }
 #[cfg(not(unix))]
-fn open_project_file(root:&str,path:&Path,mode:FileMode)->Result<File> {
-    discovery::checked_path(Path::new(root),path,matches!(mode,FileMode::Create))?;
-    Ok(OpenOptions::new().read(true).write(!matches!(mode,FileMode::Read)).create_new(matches!(mode,FileMode::Create)).open(path)?)
+fn open_project_file(root: &str, path: &Path, mode: FileMode) -> Result<File> {
+    discovery::checked_path(Path::new(root), path, matches!(mode, FileMode::Create))?;
+    Ok(OpenOptions::new()
+        .read(true)
+        .write(!matches!(mode, FileMode::Read))
+        .create_new(matches!(mode, FileMode::Create))
+        .open(path)?)
 }

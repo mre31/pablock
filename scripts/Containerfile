@@ -1,0 +1,13 @@
+FROM docker.io/library/node:24-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl ca-certificates pkg-config libwebkit2gtk-4.1-dev \
+    libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf file \
+    libssl-dev libfuse2 xdg-utils python3 xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+ENV PATH=/opt/cargo/bin:$PATH
+RUN npm install -g pnpm@11.9.0
+WORKDIR /workspace
+ENV APPIMAGE_EXTRACT_AND_RUN=1 CARGO_BUILD_JOBS=3
+CMD ["sh", "-c", "pnpm install --frozen-lockfile && pnpm tauri build"]

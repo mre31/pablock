@@ -180,3 +180,55 @@ fn process_lock_and_profile_selection() {
     .assert()
     .success();
 }
+
+#[test]
+fn usage_errors_are_json_and_do_not_echo_accidental_secret_arguments() {
+    let f = Fixture {
+        data: tempfile::tempdir().unwrap(),
+        project: tempfile::tempdir().unwrap(),
+    };
+    let out = f
+        .command(&["secret", "set", "KEY", "accidental-secret", "--json"], "")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(error["error"]["code"], 2);
+    assert!(!String::from_utf8(out.stderr)
+        .unwrap()
+        .contains("accidental-secret"));
+}
+
+#[test]
+fn appimage_cli_restores_the_callers_working_directory() {
+    let f = Fixture::new();
+    f.command(
+        &["secret", "get", "TOKEN", "--password-stdin", "--reveal"],
+        "master\n",
+    )
+    .current_dir(f.data.path())
+    .env("APPIMAGE", "/tmp/test.AppImage")
+    .env(
+        "APPDIR",
+        assert_cmd::cargo::cargo_bin!("pablock").parent().unwrap(),
+    )
+    .env("OWD", f.project.path())
+    .assert()
+    .success()
+    .stdout("initial");
+}
+
+#[test]
+fn native_cli_ignores_appimage_environment_inherited_from_an_editor() {
+    let f = Fixture::new();
+    f.command(
+        &["secret", "get", "TOKEN", "--password-stdin", "--reveal"],
+        "master\n",
+    )
+    .env("APPIMAGE", "/tmp/editor.AppImage")
+    .env("APPDIR", f.data.path())
+    .env("OWD", f.data.path())
+    .assert()
+    .success()
+    .stdout("initial");
+}

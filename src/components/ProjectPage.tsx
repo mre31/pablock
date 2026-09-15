@@ -1,43 +1,610 @@
-import { useState } from 'react';
+import { useState, useImperativeHandle, forwardRef, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ScanLine, Download, Upload, Plus, Search, FileKey2, FileText, Pencil, Trash2, Eye, EyeOff, History, KeyRound } from 'lucide-react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Plus, Pencil, Trash2, History, ScanLine } from 'lucide-react';
 import { api, type Profile, type Variable, type Version } from '../api';
 import { Confirm, date, ErrorNotice, Modal, Rename } from './common';
 import { ImportDialog, ExportDialog } from './Transfer';
-export default function ProjectPage() {
-  const {projectId=''}=useParams();const [params,setParams]=useSearchParams();const navigate=useNavigate();const client=useQueryClient();
-  const projects=useQuery({queryKey:['projects'],queryFn:()=>api('projects',{})});const project=projects.data?.find(p=>p.id===projectId);
-  const profiles=useQuery({queryKey:['profiles',projectId],queryFn:()=>api('profiles',{project:projectId})});
-  const selected=profiles.data?.find(p=>p.id===params.get('profile'))??profiles.data?.[0];
-  const [dialog,setDialog]=useState<'import'|'rename'|'remove'|null>(null);const [error,setError]=useState<unknown>();const [scanning,setScanning]=useState(false);const [notice,setNotice]=useState('');
-  const refresh=async()=>{await client.invalidateQueries({queryKey:['profiles',projectId]});await client.invalidateQueries({queryKey:['variables']});await client.invalidateQueries({queryKey:['templates']});};
-  if(projects.isPending) return <main>Loading project…</main>;
-  if(!project) return <main><ErrorNotice error={projects.error??'Project not found'}/><Link to="/">Back to projects</Link></main>;
-  return <main><Link className="back-link" to="/"><ArrowLeft size={14}/>All projects</Link><div className="page-heading"><div><div className="eyebrow">PROJECT</div><h1>{project.name}<button className="icon" aria-label="Rename project" onClick={()=>setDialog('rename')}><Pencil size={17}/></button><button className="icon" aria-label="Delete project" onClick={()=>setDialog('remove')}><Trash2 size={17}/></button></h1><code className="root-path">{project.root}</code></div><div className="actions"><button disabled={scanning} onClick={async()=>{setScanning(true);setError(undefined);try{const found=await api('scan',{project:projectId});setNotice(`Scan complete. ${found.length} profiles registered.`);await refresh();}catch(e){setError(e);}finally{setScanning(false);}}}><ScanLine size={16}/>{scanning?'Scanning…':'Scan project'}</button><button className="primary" onClick={()=>setDialog('import')}><Download size={16}/>Import files</button></div></div><ErrorNotice error={error??profiles.error}/>{notice&&<div className="notice" role="status">{notice}<button onClick={()=>setNotice('')} aria-label="Dismiss notification">×</button></div>}<div className="profile-layout"><section className="profile-list"><div className="section-label">ENVIRONMENTS <span>{profiles.data?.length??0}</span></div>{profiles.isPending?<p>Loading…</p>:profiles.data?.length?profiles.data.map(p=><button key={p.id} className={`profile-item ${selected?.id===p.id?'active':''}`} onClick={()=>setParams({profile:p.id})}>{p.kind==='template'?<FileText size={18}/>:<FileKey2 size={18}/>}<span><strong>{p.name}</strong>{p.name!==p.path&&<code>{p.path}</code>}<small>{p.kind==='template'?'Template · keys only':'Secret profile'}</small></span></button>):<p className="help">Scan your project to discover .env files. Scanning reads key names from templates; secret values are imported separately.</p>}<div className="profile-note"><KeyRound size={15}/><p>Profiles use paths relative to your project root.</p></div></section><section className="profile-content">{selected?<ProfilePanel key={selected.id} profile={selected} refresh={refresh}/>:<div className="empty"><ScanLine size={32}/><h2>Find your environments</h2><p>Scan the project to discover dotenv files, including files excluded by .gitignore.</p></div>}</section></div>{dialog==='import'&&<ImportDialog project={projectId} paths={profiles.data?.map(p=>p.path)??[]} onClose={()=>setDialog(null)} onDone={refresh}/>} {dialog==='rename'&&<Rename title="Rename project" initial={project.name} onClose={()=>setDialog(null)} onSave={async name=>{await api('rename_project',{project:projectId,name});await client.invalidateQueries({queryKey:['projects']});}}/>}{dialog==='remove'&&<Confirm title="Delete project?" description="This permanently deletes every stored value and version in this project. Source dotenv files and the project marker stay on disk." onClose={()=>setDialog(null)} onConfirm={async()=>{await api('remove_project',{project:projectId});await client.invalidateQueries({queryKey:['projects']});navigate('/');}}/>}</main>;
+import { CypherSecret } from './CypherSecret';
+import { ScanDialog } from './ScanDialog';
+
+export interface ProjectPageHandle {
+  scan: () => Promise<void>;
+  openImport: () => void;
+  openExport: () => void;
+  selectedProfile?: Profile;
 }
-function ProfilePanel({profile,refresh}:{profile:Profile;refresh:()=>Promise<void>}) {
-  const client=useQueryClient();const q=useQuery({queryKey:['variables',profile.id],queryFn:()=>api('variables',{profile:profile.id})});
-  const comparisons=useQuery({queryKey:['templates',profile.id],queryFn:()=>api('templates',{profile:profile.id}),enabled:profile.kind==='secret'});
-  const [filter,setFilter]=useState('');const [dialog,setDialog]=useState<'add'|'export'|'rename'|'remove'|null>(null);
-  const changed=async()=>{await refresh();await client.invalidateQueries({queryKey:['history',profile.id]});};
-  const secret=profile.kind==='secret';const variables=q.data?.filter(v=>v.key.toLowerCase().includes(filter.toLowerCase()))??[];
-  return <><div className="profile-heading"><div><h2>{profile.name}<span className={`badge ${secret?'':'template'}`}>{profile.kind}</span></h2><code>{profile.path}</code></div><div className="actions"><button className="icon" aria-label="Rename profile" onClick={()=>setDialog('rename')}><Pencil size={16}/></button><button className="icon" aria-label="Delete profile" onClick={()=>setDialog('remove')}><Trash2 size={16}/></button></div></div><div className="table-toolbar"><div className="search"><Search size={16}/><input aria-label="Search variables" placeholder="Search variables…" value={filter} onChange={e=>setFilter(e.target.value)}/></div>{secret&&<div className="actions"><button onClick={()=>setDialog('export')}><Upload size={15}/>Diff & export</button><button className="primary" onClick={()=>setDialog('add')}><Plus size={16}/>Add variable</button></div>}</div><ErrorNotice error={q.error??comparisons.error}/>{!secret&&<div className="template-info">Template values are never stored. Import or scan again to refresh these key names.</div>}<table><thead><tr><th>VARIABLE</th><th>VALUE</th><th>UPDATED</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{variables.map(v=><VariableRow key={`${v.key}:${v.updated_at}`} variable={v} profile={profile} refresh={changed}/>)}</tbody></table>{!variables.length&&<div className="empty small"><KeyRound size={24}/><h3>{q.isPending?'Loading variables…':filter?'No matching variables':'No values imported yet'}</h3><p>{filter?'Try another key name.':secret?'Import an env file or add a variable to get started.':'This template has no keys.'}</p></div>}<div className="table-footer"><span>{variables.filter(v=>v.has_value).length} active · {variables.filter(v=>!v.has_value).length} {secret?'deleted':'template keys'}</span><span>{secret?'Values are masked by default':'Key names only'}</span></div>{comparisons.data&&comparisons.data.length>0&&<details className="template-check"><summary>Template comparison <span className="count">{comparisons.data.length}</span></summary>{comparisons.data.map(c=><div key={c.template}><code>{c.template}</code><p><span className="warning">Missing ({c.missing.length})</span> {c.missing.join(', ')||'None'}</p><p>Extra ({c.extra.length}) {c.extra.join(', ')||'None'}</p></div>)}</details>}{dialog==='add'&&<EditSecret profile={profile.id} onClose={()=>setDialog(null)} onDone={changed}/>} {dialog==='export'&&<ExportDialog profile={profile} onClose={()=>setDialog(null)}/>} {dialog==='rename'&&<Rename title="Rename profile" initial={profile.name} onClose={()=>setDialog(null)} onSave={async name=>{await api('rename_profile',{profile:profile.id,name});await refresh();}}/>}{dialog==='remove'&&<Confirm title="Delete profile?" description="All stored values and versions in this profile will be permanently deleted. The source file stays on disk." onClose={()=>setDialog(null)} onConfirm={async()=>{await api('remove_profile',{profile:profile.id});await refresh();}}/>}</>;
+
+interface ProjectPageProps {
+  filter?: string;
+  onNotice?: (msg: string) => void;
+  onError?: (err: unknown) => void;
 }
-function VariableRow({variable:v,profile,refresh}:{variable:Variable;profile:Profile;refresh:()=>Promise<void>}) {
-  const [revealed,setRevealed]=useState<string|null>(null);const [loading,setLoading]=useState(false);const [error,setError]=useState<unknown>();const [dialog,setDialog]=useState<'edit'|'remove'|'history'|null>(null);
-  return <tr><td><code className="variable-key">{v.key}</code></td><td><div className="value-cell"><code className={revealed===null?'masked':'revealed'}>{!v.has_value?profile.kind==='template'?'Template key':'Deleted':revealed??'••••••••••••'}</code>{v.has_value&&<button className="icon" disabled={loading} aria-label={`${revealed===null?'Reveal':'Hide'} ${v.key}`} onClick={async()=>{if(revealed!==null){setRevealed(null);return;}setLoading(true);try{setRevealed(await api('reveal',{profile:profile.id,key:v.key}));}catch(e){setError(e);}finally{setLoading(false);}}}>{revealed===null?<Eye size={15}/>:<EyeOff size={15}/>}</button>}</div><ErrorNotice error={error}/></td><td className="timestamp">{date(v.updated_at)}</td><td>{profile.kind==='secret'&&<div className="row-actions"><button className="icon" aria-label={`Edit ${v.key}`} onClick={()=>{setRevealed(null);setDialog('edit');}}><Pencil size={15}/></button><button className="icon" aria-label={`History ${v.key}`} onClick={()=>{setRevealed(null);setDialog('history');}}><History size={15}/></button>{v.has_value&&<button className="icon" aria-label={`Delete ${v.key}`} onClick={()=>{setRevealed(null);setDialog('remove');}}><Trash2 size={15}/></button>}</div>}{dialog==='edit'&&<EditSecret profile={profile.id} variable={v} onClose={()=>setDialog(null)} onDone={refresh}/>} {dialog==='history'&&<HistoryDialog profile={profile.id} variable={v.key} onClose={()=>setDialog(null)} onDone={refresh}/>} {dialog==='remove'&&<Confirm title={`Delete ${v.key}?`} description="This adds a deleted version. You can restore a previous value from history." onClose={()=>setDialog(null)} onConfirm={async()=>{await api('remove_secret',{profile:profile.id,key:v.key});await refresh();}}/>}</td></tr>;
+
+export const ProjectPage = forwardRef<ProjectPageHandle, ProjectPageProps>(function ProjectPage(
+  { filter = '', onNotice, onError },
+  ref
+) {
+  const { projectId = '' } = useParams();
+  const [params, setParams] = useSearchParams();
+  const client = useQueryClient();
+
+  const projects = useQuery({ queryKey: ['projects'], queryFn: () => api('projects', {}) });
+  const project = projects.data?.find(p => p.id === projectId);
+
+  const profiles = useQuery({
+    queryKey: ['profiles', projectId],
+    queryFn: () => api('profiles', { project: projectId }),
+    enabled: !!projectId,
+  });
+
+  const selected = profiles.data?.find(p => p.id === params.get('profile')) ?? profiles.data?.[0];
+
+  const [dialog, setDialog] = useState<
+    | { type: 'add' }
+    | { type: 'edit'; variable: Variable }
+    | { type: 'remove'; variable: Variable }
+    | { type: 'history'; variable: string }
+    | { type: 'import' }
+    | { type: 'export' }
+    | { type: 'rename' }
+    | { type: 'delete_profile' }
+    | null
+  >(null);
+
+  const [scanProfiles, setScanProfiles] = useState<Profile[] | null>(null);
+  const [localError, setLocalError] = useState<unknown>();
+  const [scanning, setScanning] = useState(false);
+
+  const refresh = async () => {
+    await client.invalidateQueries({ queryKey: ['profiles', projectId] });
+    await client.invalidateQueries({ queryKey: ['variables'] });
+    await client.invalidateQueries({ queryKey: ['templates'] });
+  };
+
+  const handleScan = async () => {
+    setScanning(true);
+    setLocalError(undefined);
+    try {
+      const found = await api('discover', { project: projectId });
+      setScanProfiles(found);
+    } catch (e) {
+      setLocalError(e);
+      if (onError) onError(e);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const handleConfirmScan = async (selectedPaths: string[], importKeys: boolean) => {
+    if (importKeys && selectedPaths.length > 0) {
+      await api('import', { project: projectId, files: selectedPaths, replace: false });
+    } else {
+      await api('register_profiles', { project: projectId, paths: selectedPaths });
+    }
+    const msg = `Scan complete. ${selectedPaths.length} profiles registered.`;
+    if (onNotice) onNotice(msg);
+    await refresh();
+    if (selectedPaths.length > 0 && !params.get('profile')) {
+      const registered = await api('profiles', { project: projectId });
+      const matched = registered.find(p => selectedPaths.includes(p.path));
+      if (matched) {
+        setParams({ profile: matched.id });
+      }
+    }
+    setScanProfiles(null);
+  };
+
+  useImperativeHandle(ref, () => ({
+    scan: handleScan,
+    openImport: () => setDialog({ type: 'import' }),
+    openExport: () => { if (selected?.kind === 'secret') setDialog({ type: 'export' }); else setLocalError('Select a secret profile to export values.'); },
+    selectedProfile: selected,
+  }));
+
+  const variablesQuery = useQuery({
+    queryKey: ['variables', selected?.id],
+    queryFn: () => api('variables', { profile: selected!.id }),
+    enabled: !!selected?.id,
+  });
+
+  const comparisons = useQuery({queryKey:['templates',selected?.id], queryFn:()=>api('templates',{profile:selected!.id}), enabled:selected?.kind==='secret'});
+  useEffect(() => { setDialog(null); setScanProfiles(null); setLocalError(undefined); }, [projectId, selected?.id]);
+
+  if (projects.isPending) return <div className="loading">Loading project…</div>;
+  if (!project) {
+    return (
+      <div className="empty">
+        <ErrorNotice error={projects.error ?? 'Project not found'} />
+        <Link to="/" className="primary">Back to projects</Link>
+      </div>
+    );
+  }
+
+  const allVariables = variablesQuery.data ?? [];
+  const filteredVariables = allVariables.filter(v =>
+    v.key.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  return (
+    <>
+      <ErrorNotice error={localError ?? profiles.error ?? variablesQuery.error} />
+
+      {/* Profile Header Area */}
+      <section className="profile-header-area">
+        <div className="profile-info">
+          <h1 className="profile-title">{selected ? selected.name : project.name}</h1>
+          <p className="profile-breadcrumb">
+            {project.name} / {selected ? selected.path : project.root}
+          </p>
+        </div>
+
+        <div className="profile-meta-pills">
+          {selected && <><span className="badge">{selected.kind}</span><button className="icon-tool-btn" aria-label="Rename profile" onClick={()=>setDialog({type:'rename'})}><Pencil size={15}/></button><button className="icon-tool-btn" aria-label="Delete profile" onClick={()=>setDialog({type:'delete_profile'})}><Trash2 size={15}/></button></>}
+          <span className="pill-variable-count">
+            {allVariables.length} variables
+          </span>
+        </div>
+      </section>
+
+      {/* Variables Panel */}
+      <section className="variables-panel">
+        <div className="variables-panel-header">
+          <h2 className="variables-heading">Variables</h2>
+          {selected && selected.kind === 'secret' && (
+            <button
+              className="add-variable-btn"
+              type="button"
+              onClick={() => setDialog({ type: 'add' })}
+            >
+              <Plus size={15} />
+              <span>Add variable</span>
+            </button>
+          )}
+        </div>
+
+        <div className="table-wrapper">
+          {profiles.data && profiles.data.length === 0 ? (
+            <div className="empty">
+              <h2>Find your environments</h2>
+              <p>Scan the project to discover dotenv files, including files excluded by .gitignore.</p>
+              <button
+                className="primary"
+                type="button"
+                disabled={scanning}
+                onClick={handleScan}
+              >
+                <ScanLine size={15} />
+                <span>{scanning ? 'Scanning…' : 'Scan project'}</span>
+              </button>
+            </div>
+          ) : !selected ? (
+            <div className="empty">
+              <p>Select an environment from the sidebar.</p>
+            </div>
+          ) : (
+            <table className="env-table">
+              <thead>
+                <tr>
+                  <th className="col-head th-key">Key</th>
+                  <th className="col-head th-value">Value</th>
+                  <th className="col-head th-modified">Last modified</th>
+                  <th className="col-head th-actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredVariables.map(v => (
+                  <tr className="table-row" key={`${selected.id}:${v.key}:${v.updated_at}`}>
+                    <td className="cell-key font-mono">{v.key}</td>
+                    <td className="cell-value">
+                      <CypherSecret
+                        profileId={selected.id}
+                        variableKey={v.key}
+                        hasValue={v.has_value}
+                        isTemplate={selected.kind === 'template'}
+                      />
+                    </td>
+                    <td className="cell-modified">{date(v.updated_at)}</td>
+                    <td className="cell-actions">
+                      {selected.kind === 'secret' && (
+                        <>
+                          <button
+                            className="icon-tool-btn"
+                            type="button"
+                            title="Edit"
+                            aria-label={`Edit ${v.key}`}
+                            onClick={() => setDialog({ type: 'edit', variable: v })}
+                          >
+                            <Pencil size={15} />
+                          </button>
+                          <button
+                            className="icon-tool-btn"
+                            type="button"
+                            title="Delete"
+                            aria-label={`Delete ${v.key}`}
+                            onClick={() => setDialog({ type: 'remove', variable: v })}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                          <button
+                            className="icon-tool-btn"
+                            type="button"
+                            title="History"
+                            aria-label={`History ${v.key}`}
+                            onClick={() => setDialog({ type: 'history', variable: v.key })}
+                          >
+                            <History size={15} />
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {selected && filteredVariables.length === 0 && profiles.data && profiles.data.length > 0 && (
+            <div className="empty small">
+              <p>
+                {filter
+                  ? 'No matching variables found.'
+                  : selected.kind === 'secret'
+                  ? 'No variables in this profile. Click "+ Add variable" or import a file.'
+                  : 'This template has no keys.'}
+              </p>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <ErrorNotice error={comparisons.error}/>
+      {selected?.kind==='template' && <p className="help">Template values are never stored. Scan or import again to refresh key names.</p>}
+      {!!comparisons.data?.length && <details className="template-check"><summary>Template comparison</summary>{comparisons.data.map(c=><div key={c.template}><code>{c.template}</code><p className="warning">Missing ({c.missing.length}): {c.missing.join(', ')||'None'}</p><p>Extra ({c.extra.length}): {c.extra.join(', ')||'None'}</p></div>)}</details>}
+      {dialog?.type==='rename' && selected && <Rename title="Rename profile" initial={selected.name} onClose={()=>setDialog(null)} onSave={async name=>{await api('rename_profile',{profile:selected.id,name});await refresh();}}/>}
+      {dialog?.type==='delete_profile' && selected && <Confirm title="Delete profile?" description="This permanently deletes all values and versions in this profile. Source files stay on disk." onClose={()=>setDialog(null)} onConfirm={async()=>{await api('remove_profile',{profile:selected.id});setParams({});await refresh();}}/>}
+      {/* Dialogs */}
+      {dialog?.type === 'add' && selected && (
+        <EditSecret profile={selected.id} onClose={() => setDialog(null)} onDone={refresh} />
+      )}
+
+      {dialog?.type === 'edit' && selected && (
+        <EditSecret
+          profile={selected.id}
+          variable={dialog.variable}
+          onClose={() => setDialog(null)}
+          onDone={refresh}
+        />
+      )}
+
+      {dialog?.type === 'remove' && selected && (
+        <Confirm
+          title={`Delete ${dialog.variable.key}?`}
+          description="This adds a deleted version. You can restore a previous value from history."
+          onClose={() => setDialog(null)}
+          onConfirm={async () => {
+            await api('remove_secret', { profile: selected.id, key: dialog.variable.key });
+            await refresh();
+          }}
+        />
+      )}
+
+      {dialog?.type === 'history' && selected && (
+        <HistoryDialog
+          profile={selected.id}
+          variable={dialog.variable}
+          onClose={() => setDialog(null)}
+          onDone={refresh}
+        />
+      )}
+
+      {dialog?.type === 'import' && (
+        <ImportDialog
+          project={projectId}
+          paths={profiles.data?.map(p => p.path) ?? []}
+          onClose={() => setDialog(null)}
+          onDone={refresh}
+        />
+      )}
+
+      {dialog?.type === 'export' && selected && (
+        <ExportDialog profile={selected} onClose={() => setDialog(null)} />
+      )}
+
+      {scanProfiles && (
+        <ScanDialog
+          projectId={projectId}
+          profiles={scanProfiles}
+          onClose={() => setScanProfiles(null)}
+          onConfirm={handleConfirmScan}
+        />
+      )}
+    </>
+  );
+});
+
+export default ProjectPage;
+
+function EditSecret({
+  profile,
+  variable,
+  onDone,
+  onClose,
+}: {
+  profile: string;
+  variable?: Variable;
+  onDone: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [key, setKey] = useState(variable?.key ?? '');
+  const [value, setValue] = useState('');
+  const [visible, setVisible] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <Modal title={variable ? 'Edit variable' : 'Add variable'} onClose={onClose}>
+      <form
+        onSubmit={async e => {
+          e.preventDefault();
+          setBusy(true);
+          const secret = value;
+          setValue('');
+          try {
+            await api('set', { profile, key, value: secret });
+            await onDone();
+            onClose();
+          } catch (e) {
+            setError(e);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <label>
+          Variable name
+          <input
+            autoFocus={!variable}
+            value={key}
+            onChange={e => setKey(e.target.value)}
+            disabled={!!variable}
+            pattern="[A-Za-z_][A-Za-z0-9_]*"
+            required
+            placeholder="DATABASE_URL"
+          />
+        </label>
+        <label>
+          Value
+          <textarea
+            className={visible ? '' : 'secret-input'}
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+            rows={5}
+            placeholder="Enter a value. Empty values are allowed."
+          />
+        </label>
+        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+          <button type="button" className="secondary" onClick={() => setVisible(!visible)}>
+            {visible ? 'Hide value' : 'Show value'}
+          </button>
+          {variable?.has_value && (
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  setValue(await api('reveal', { profile, key }));
+                } catch (e) {
+                  setError(e);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Load current value
+            </button>
+          )}
+        </div>
+        <p className="help">Saving creates a new version. Multiline values are supported.</p>
+        <ErrorNotice error={error} />
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary" disabled={busy}>
+            Save variable
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
-function EditSecret({profile,variable,onDone,onClose}:{profile:string;variable?:Variable;onDone:()=>Promise<void>;onClose:()=>void}) {
-  const [key,setKey]=useState(variable?.key??'');const [value,setValue]=useState('');const [visible,setVisible]=useState(false);const [error,setError]=useState<unknown>();const [busy,setBusy]=useState(false);
-  return <Modal title={variable?'Edit variable':'Add variable'} onClose={onClose}><form onSubmit={async e=>{e.preventDefault();setBusy(true);const secret=value;setValue('');try{await api('set',{profile,key,value:secret});await onDone();onClose();}catch(e){setError(e);}finally{setBusy(false);}}}><label>Variable name<input autoFocus={!variable} value={key} onChange={e=>setKey(e.target.value)} disabled={!!variable} pattern="[A-Za-z_][A-Za-z0-9_]*" required placeholder="DATABASE_URL"/></label><label>Value<textarea className={visible?'':'secret-input'} value={value} onChange={e=>setValue(e.target.value)} spellCheck={false} autoComplete="off" rows={5} placeholder="Enter a value. Empty values are allowed."/></label><div className="actions"><button type="button" onClick={()=>setVisible(!visible)}>{visible?'Hide value':'Show value'}</button>{variable?.has_value&&<button type="button" disabled={busy} onClick={async()=>{setBusy(true);try{setValue(await api('reveal',{profile,key}));}catch(e){setError(e);}finally{setBusy(false);}}}>Load current value</button>}</div><p className="help">Saving creates a new version. Multiline values are supported.</p><ErrorNotice error={error}/><div className="modal-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>Save variable</button></div></form></Modal>;
+
+function HistoryDialog({
+  profile,
+  variable,
+  onClose,
+  onDone,
+}: {
+  profile: string;
+  variable: string;
+  onClose: () => void;
+  onDone: () => Promise<void>;
+}) {
+  const q = useQuery({
+    queryKey: ['history', profile, variable],
+    queryFn: () => api('history', { profile, key: variable }),
+  });
+  const [confirm, setConfirm] = useState(false);
+  const [error, setError] = useState<unknown>();
+
+  const refresh = async () => {
+    await onDone();
+    await q.refetch();
+  };
+
+  return (
+    <Modal title={`History · ${variable}`} onClose={onClose}>
+      <p>Restore any version as a new current version.</p>
+      <ErrorNotice error={q.error ?? error} />
+      <div className="history-list">
+        {q.data?.map(v => (
+          <HistoryRow
+            key={v.id}
+            version={v}
+            profile={profile}
+            variable={variable}
+            onDone={refresh}
+          />
+        ))}
+      </div>
+      {confirm ? (
+        <div className="inline-confirm">
+          <p>Permanently delete every old version? The current version will stay.</p>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="secondary" onClick={() => setConfirm(false)}>
+              Cancel
+            </button>
+            <button
+              className="danger"
+              onClick={async () => {
+                try {
+                  await api('clear_history', { profile, key: variable });
+                  await refresh();
+                  setConfirm(false);
+                } catch (e) {
+                  setError(e);
+                }
+              }}
+            >
+              Confirm clear history
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          disabled={(q.data?.length ?? 0) < 2}
+          className="danger subtle"
+          onClick={() => setConfirm(true)}
+        >
+          Clear old history
+        </button>
+      )}
+    </Modal>
+  );
 }
-function HistoryDialog({profile,variable,onClose,onDone}:{profile:string;variable:string;onClose:()=>void;onDone:()=>Promise<void>}) {
-  const q=useQuery({queryKey:['history',profile,variable],queryFn:()=>api('history',{profile,key:variable})});const [confirm,setConfirm]=useState(false);const [error,setError]=useState<unknown>();
-  const refresh=async()=>{await onDone();await q.refetch();};
-  return <Modal title={`History · ${variable}`} onClose={onClose}><p>Restore any version as a new current version.</p><ErrorNotice error={q.error??error}/><div className="history-list">{q.data?.map(v=><HistoryRow key={v.id} version={v} profile={profile} variable={variable} onDone={refresh}/>)}</div>{confirm?<div className="inline-confirm"><p>Permanently delete every old version? The current version will stay.</p><button onClick={()=>setConfirm(false)}>Cancel</button><button className="danger" onClick={async()=>{try{await api('clear_history',{profile,key:variable});await refresh();setConfirm(false);}catch(e){setError(e);}}}>Confirm clear history</button></div>:<button disabled={(q.data?.length??0)<2} className="danger subtle" onClick={()=>setConfirm(true)}>Clear old history</button>}</Modal>;
-}
-function HistoryRow({version:v,profile,variable,onDone}:{version:Version;profile:string;variable:string;onDone:()=>Promise<void>}) {
-  const [value,setValue]=useState<string|null>(null);const [error,setError]=useState<unknown>();const [busy,setBusy]=useState(false);const [confirm,setConfirm]=useState<'restore'|'delete_version'|null>(null);
-  return <div className="history-item"><div><span className="badge">{v.action}</span>{v.current&&<span className="badge current">Current</span>}<time>{date(v.created_at)}</time></div><code className="version-id">{v.id}</code><p className="help">Source: {v.source}</p>{value!==null&&<pre className="revealed history-value">{value}</pre>}<div className="actions">{v.has_value&&<button disabled={busy} onClick={async()=>{if(value!==null){setValue(null);return;}setBusy(true);try{setValue(await api('reveal',{profile,key:variable,version:v.id}));}catch(e){setError(e);}finally{setBusy(false);}}}>{value===null?'Reveal version':'Hide version'}</button>}<button disabled={busy} onClick={()=>{setValue(null);setConfirm('restore');}}>Restore</button>{!v.current&&<button className="danger subtle" disabled={busy} onClick={()=>{setValue(null);setConfirm('delete_version');}}>Delete version</button>}</div>{confirm&&<div className="inline-confirm"><p>{confirm==='restore'?'Create a new current version from this version?':'Permanently delete this version?'}</p><button onClick={()=>setConfirm(null)}>Cancel</button><button className="primary" disabled={busy} onClick={async()=>{setBusy(true);try{await api(confirm,{profile,key:variable,version:v.id});setConfirm(null);await onDone();}catch(e){setError(e);}finally{setBusy(false);}}}>{confirm==='restore'?'Confirm restore':'Confirm deletion'}</button></div>}<ErrorNotice error={error}/></div>;
+
+function HistoryRow({
+  version: v,
+  profile,
+  variable,
+  onDone,
+}: {
+  version: Version;
+  profile: string;
+  variable: string;
+  onDone: () => Promise<void>;
+}) {
+  const [value, setValue] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>();
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<'restore' | 'delete_version' | null>(null);
+
+  return (
+    <div className="history-item">
+      <div className="history-item-top">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span className="badge">{v.action}</span>
+          {v.current && <span className="badge current">Current</span>}
+        </div>
+        <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{date(v.created_at)}</span>
+      </div>
+      <code className="version-id">{v.id}</code>
+      <p className="help">Source: {v.source}</p>
+      {value !== null && <pre className="history-value">{value}</pre>}
+      <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+        {v.has_value && (
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={async () => {
+              if (value !== null) {
+                setValue(null);
+                return;
+              }
+              setBusy(true);
+              try {
+                setValue(await api('reveal', { profile, key: variable, version: v.id }));
+              } catch (e) {
+                setError(e);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {value === null ? 'Reveal version' : 'Hide version'}
+          </button>
+        )}
+        <button
+          className="secondary"
+          disabled={busy}
+          onClick={() => {
+            setValue(null);
+            setConfirm('restore');
+          }}
+        >
+          Restore
+        </button>
+        {!v.current && (
+          <button
+            className="danger subtle"
+            disabled={busy}
+            onClick={() => {
+              setValue(null);
+              setConfirm('delete_version');
+            }}
+          >
+            Delete version
+          </button>
+        )}
+      </div>
+      {confirm && (
+        <div className="inline-confirm">
+          <p>
+            {confirm === 'restore'
+              ? 'Create a new current version from this version?'
+              : 'Permanently delete this version?'}
+          </p>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="secondary" onClick={() => setConfirm(null)}>
+              Cancel
+            </button>
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await api(confirm, { profile, key: variable, version: v.id });
+                  setConfirm(null);
+                  await onDone();
+                } catch (e) {
+                  setError(e);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              {confirm === 'restore' ? 'Confirm restore' : 'Confirm deletion'}
+            </button>
+          </div>
+        </div>
+      )}
+      <ErrorNotice error={error} />
+    </div>
+  );
 }

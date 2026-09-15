@@ -22,13 +22,15 @@ beforeEach(()=>{
    case 'lock':unlocked=false;return null;
    case 'projects':return [project];
    case 'profiles':return profiles;
+   case 'discover':return [profile];
+   case 'register_profiles':profiles=[profile];return profiles;
    case 'scan':profiles=[profile];return profiles;
    case 'variables':return [{key:'TOKEN',has_value:true,updated_at:`2026-01-01T10:00:0${revision}Z`}];
    case 'templates':return [];
    case 'reveal':return request.version?'previous-secret':token;
    case 'set':token=String(request.value);revision++;return null;
    case 'preview_import':return [{path:'.env',kind:'secret',diff,warnings:[]}];
-   case 'import':revision++;return [];
+   case 'import':profiles=[profile];revision++;return [];
    case 'diff':return diff;
    case 'export':return diff;
    case 'history':return [{id:'version-1',key:'TOKEN',action:'set',source:'manual',created_at:'2026-01-01T09:00:00Z',has_value:true,current:false},{id:'version-2',key:'TOKEN',action:'set',source:'manual',created_at:'2026-01-01T10:00:00Z',has_value:true,current:true}];
@@ -45,7 +47,13 @@ describe('vault workflows',()=>{
   expect(await screen.findByRole('heading',{name:/Your projects/})).toBeInTheDocument();expect(calls).toContainEqual({op:'init',password:'master-pass'});expect(JSON.stringify(client.getQueryCache().getAll().map(q=>q.state.data))).not.toContain('master-pass');expect(screen.queryByLabelText('Master password')).not.toBeInTheDocument();
  });
  it('scans the project and shows discovered profiles',async()=>{
-  profiles=[];const {user}=setup();await user.click(await screen.findByRole('button',{name:'Scan project'}));expect(await screen.findByText('Scan complete. 1 profiles registered.')).toBeInTheDocument();expect(await screen.findByText('TOKEN')).toBeInTheDocument();expect(calls.some(c=>c.op==='scan'&&c.project==='project-1')).toBe(true);
+  profiles=[];const {user}=setup();await user.click((await screen.findAllByRole('button',{name:'Scan project'}))[0]);
+  const dialog=await screen.findByRole('dialog',{name:'Scan project'});
+  expect(calls.some(c=>c.op==='import'||c.op==='register_profiles')).toBe(false);
+  await user.click(within(dialog).getByRole('button',{name:'Preview import'}));
+  expect(await within(dialog).findByText('NEW_KEY')).toBeInTheDocument();
+  await user.click(within(dialog).getByRole('button',{name:'Confirm'}));
+  expect(await screen.findByText('Scan complete. 1 profiles registered.')).toBeInTheDocument();expect(await screen.findByText('TOKEN')).toBeInTheDocument();expect(calls.some(c=>c.op==='discover'&&c.project==='project-1')).toBe(true);
  });
  it('previews replace import before applying changes',async()=>{
   const {user}=setup();await user.click(await screen.findByRole('button',{name:'Import files'}));const dialog=screen.getByRole('dialog',{name:'Import dotenv files'});await user.click(within(dialog).getByRole('radio',{name:/Replace/}));await user.click(within(dialog).getByRole('button',{name:'Preview import'}));expect(await within(dialog).findByText('NEW_KEY')).toBeInTheDocument();expect(calls.some(c=>c.op==='import')).toBe(false);await user.click(within(dialog).getByRole('button',{name:'Confirm import'}));await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());expect(calls).toContainEqual({op:'import',project:'project-1',files:['.env'],replace:true});
@@ -54,13 +62,35 @@ describe('vault workflows',()=>{
   const {user,client}=setup();await user.click(await screen.findByRole('button',{name:'Edit TOKEN'}));const dialog=screen.getByRole('dialog',{name:'Edit variable'});await user.type(within(dialog).getByLabelText('Value'),'new-secret');await user.click(within(dialog).getByRole('button',{name:'Save variable'}));await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());expect(calls).toContainEqual({op:'set',profile:'profile-1',key:'TOKEN',value:'new-secret'});expect(JSON.stringify(client.getQueryCache().getAll().map(q=>q.state.data))).not.toContain('new-secret');expect(screen.queryByText('new-secret')).not.toBeInTheDocument();
  });
  it('reveals a row, hides it, and clears displayed secrets on lock',async()=>{
-  const {user,client}=setup();await user.click(await screen.findByRole('button',{name:'Reveal TOKEN'}));expect(await screen.findByText('a-private-secret')).toBeInTheDocument();expect(JSON.stringify(client.getQueryCache().getAll().map(q=>q.state.data))).not.toContain('a-private-secret');await user.click(screen.getByRole('button',{name:'Hide TOKEN'}));expect(screen.queryByText('a-private-secret')).not.toBeInTheDocument();await user.click(screen.getByRole('button',{name:'Lock vault'}));expect(await screen.findByRole('button',{name:'Unlock vault'})).toBeInTheDocument();expect(screen.queryByText('TOKEN')).not.toBeInTheDocument();
+  const {user,client}=setup();await user.click(await screen.findByRole('button',{name:'Reveal TOKEN'}));expect(await screen.findByText('a-private-secret')).toBeInTheDocument();expect(JSON.stringify(client.getQueryCache().getAll().map(q=>q.state.data))).not.toContain('a-private-secret');await user.click(screen.getByRole('button',{name:'Hide TOKEN'}));expect(screen.queryByText('a-private-secret')).not.toBeInTheDocument();expect(document.body.innerHTML).not.toContain('a-private-secret');await user.click(screen.getByRole('button',{name:'Lock vault'}));expect(await screen.findByRole('button',{name:'Unlock vault'})).toBeInTheDocument();expect(screen.queryByText('TOKEN')).not.toBeInTheDocument();
  });
  it('compares export and requests explicit overwrite selection',async()=>{
   const {user}=setup();await user.click(await screen.findByRole('button',{name:'Diff & export'}));const dialog=screen.getByRole('dialog',{name:'Diff & export'});await user.click(within(dialog).getByRole('button',{name:'Compare with disk'}));expect(await within(dialog).findByText('NEW_KEY')).toBeInTheDocument();expect(calls.some(c=>c.op==='export')).toBe(false);await user.click(within(dialog).getByRole('checkbox'));await user.click(within(dialog).getByRole('button',{name:'Export file'}));expect(await within(dialog).findByText('Export complete.')).toBeInTheDocument();expect(calls).toContainEqual({op:'export',profile:'profile-1',target:'.env',overwrite:true});
  });
  it('restores a historical version after confirmation',async()=>{
   const {user}=setup();await user.click(await screen.findByRole('button',{name:'History TOKEN'}));const dialog=screen.getByRole('dialog',{name:'History · TOKEN'});await within(dialog).findByText('version-1');await user.click(within(dialog).getAllByRole('button',{name:'Restore'})[0]);expect(calls.some(c=>c.op==='restore')).toBe(false);await user.click(within(dialog).getByRole('button',{name:'Confirm restore'}));await waitFor(()=>expect(calls).toContainEqual({op:'restore',profile:'profile-1',key:'TOKEN',version:'version-1'}));
+ });
+ it('registers scan selections without importing values',async()=>{
+  const {user}=setup();await user.click(await screen.findByRole('button',{name:'Scan project'}));
+  const dialog=await screen.findByRole('dialog',{name:'Scan project'});
+  await user.click(within(dialog).getByRole('checkbox',{name:'Import secret values into vault'}));
+  await user.click(within(dialog).getByRole('button',{name:'Confirm'}));
+  await waitFor(()=>expect(calls).toContainEqual({op:'register_profiles',project:'project-1',paths:['.env']}));
+  expect(calls.some(c=>c.op==='import')).toBe(false);
+ });
+ it('clears a revealed value when switching profiles with identical key timestamps',async()=>{
+  profiles=[profile,{...profile,id:'profile-2',path:'.env.production',name:'.env.production'}];
+  const {user}=setup();await user.click(await screen.findByRole('button',{name:'Reveal TOKEN'}));
+  expect(await screen.findByText('a-private-secret')).toBeInTheDocument();
+  await user.click(screen.getByRole('button',{name:'.env.production'}));
+  await waitFor(()=>expect(document.body.innerHTML).not.toContain('a-private-secret'));
+  expect(screen.getByRole('button',{name:'Reveal TOKEN'})).toBeInTheDocument();
+ });
+ it('asks Rust for the value again after hiding it',async()=>{
+  const {user}=setup();await user.click(await screen.findByRole('button',{name:'Reveal TOKEN'}));
+  await user.click(await screen.findByRole('button',{name:'Hide TOKEN'}));
+  await user.click(await screen.findByRole('button',{name:'Reveal TOKEN'}));
+  await waitFor(()=>expect(calls.filter(c=>c.op==='reveal')).toHaveLength(2));
  });
  it('shows backend errors without reporting success',async()=>{
   const {user}=setup();await screen.findByText('TOKEN');vi.mocked(invoke).mockRejectedValueOnce({code:6,message:'Disk is full'});await user.click(screen.getByRole('button',{name:'Scan project'}));expect(await screen.findByRole('alert')).toHaveTextContent('Disk is full');expect(screen.queryByText(/Scan complete/)).not.toBeInTheDocument();

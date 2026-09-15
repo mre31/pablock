@@ -4,3 +4,7 @@ target/
 *.local
 .env*
 !.env.example
+.pnpm-store/
+artifacts/
+*.tsbuildinfo
+src-tauri/gen/

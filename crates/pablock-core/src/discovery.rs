@@ -124,8 +124,7 @@ pub fn checked_path(root: &Path, path: &Path, allow_missing: bool) -> Result<Pat
             Err(e)
                 if e.kind() == std::io::ErrorKind::NotFound
                     && allow_missing
-                    && i + 1 == parts.len() =>
-            {}
+                    && i + 1 == parts.len() => {}
             Err(e) => return Err(e.into()),
         }
     }
