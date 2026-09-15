@@ -11,6 +11,7 @@ impl Fixture {
     fn command(&self, args: &[&str], input: &str) -> Command {
         let mut c = cargo_bin_cmd!("pablock");
         c.env("XDG_DATA_HOME", self.data.path())
+            .env("APPDATA", self.data.path())
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .current_dir(self.project.path())

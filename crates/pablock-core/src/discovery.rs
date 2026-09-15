@@ -31,8 +31,18 @@ pub fn read_marker(path: &Path) -> Result<Marker> {
     }
     Ok(marker)
 }
+pub fn strip_verbatim(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
 pub fn find_root(start: &Path) -> Result<PathBuf> {
-    let start = start.canonicalize()?;
+    let start = strip_verbatim(start.canonicalize()?);
     let mut git = None;
     for p in start.ancestors() {
         if p.join(".pablock.toml").is_file() {

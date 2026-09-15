@@ -45,7 +45,10 @@ fn private_file(path: &Path) -> Result<File> {
     Ok(o.open(path)?)
 }
 fn sync_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
     File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +101,13 @@ impl Drop for Vault {
 }
 impl Vault {
     pub fn data_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("PABLOCK_DATA_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
+        #[cfg(windows)]
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return Ok(PathBuf::from(appdata).join("pablock"));
+        }
         directories::ProjectDirs::from("com", "pablock", "pablock")
             .map(|d| d.data_dir().to_path_buf())
             .ok_or_else(|| Error::Io("Cannot determine application data directory".into()))
@@ -248,9 +258,12 @@ impl Vault {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
         }
+        #[cfg(unix)]
         File::open(&tmp)?.sync_all()?;
+        #[cfg(windows)]
+        OpenOptions::new().write(true).open(&tmp)?.sync_all()?;
         self.checkpoint(FaultPoint::TemporarySnapshot)?;
-        fs::rename(tmp, self.dir.join("pablock.hold"))?;
+        fs::rename(&tmp, self.dir.join("pablock.hold"))?;
         sync_dir(&self.dir)?;
         Ok(())
     }
@@ -386,6 +399,7 @@ impl Vault {
     pub fn project(&self, selector: &str) -> Result<Project> {
         let canonical = Path::new(selector)
             .canonicalize()
+            .map(discovery::strip_verbatim)
             .ok()
             .and_then(|p| p.to_str().map(str::to_string));
         self.projects()?
@@ -416,7 +430,7 @@ impl Vault {
     }
     pub fn add_project(&mut self, path: &Path, name: Option<&str>) -> Result<Project> {
         self.ready()?;
-        let root = path.canonicalize()?;
+        let root = discovery::strip_verbatim(path.canonicalize()?);
         if !root.is_dir() {
             return Err(Error::Usage("Project root must be a directory".into()));
         }
@@ -1191,9 +1205,16 @@ fn open_project_file(root: &str, path: &Path, mode: FileMode) -> Result<File> {
 #[cfg(not(unix))]
 fn open_project_file(root: &str, path: &Path, mode: FileMode) -> Result<File> {
     discovery::checked_path(Path::new(root), path, matches!(mode, FileMode::Create))?;
-    Ok(OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .write(!matches!(mode, FileMode::Read))
         .create_new(matches!(mode, FileMode::Create))
-        .open(path)?)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Error::Conflict("Destination appeared since preview; compare again".into())
+            } else {
+                e.into()
+            }
+        })
 }
