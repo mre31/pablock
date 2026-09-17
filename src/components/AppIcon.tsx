@@ -1,6 +1,12 @@
-import iconUrl from '../../assets/icon.svg';
+import iconUrl from '../../assets/icon-backgroundless.png';
 
-export function AppIcon({ size = 16, className }: { size?: number; className?: string }) {
+interface AppIconProps {
+  size?: number;
+  className?: string;
+  invert?: boolean;
+}
+
+export function AppIcon({ size = 16, className, invert = false }: AppIconProps) {
   return (
     <img
       src={iconUrl}
@@ -8,7 +14,7 @@ export function AppIcon({ size = 16, className }: { size?: number; className?: s
       width={size}
       height={size}
       draggable={false}
-      className={className}
+      className={`${className ?? ''} ${invert ? 'icon-invert' : ''}`.trim()}
     />
   );
 }

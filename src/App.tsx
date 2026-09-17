@@ -17,6 +17,7 @@ import {
   FolderPlus,
   Trash2,
   Pencil,
+  LayoutGrid,
 } from 'lucide-react';
 import { api, type Project, type Profile } from './api';
 import { Brand, Confirm, ErrorNotice, Modal, Rename } from './components/common';
@@ -226,8 +227,18 @@ export default function App() {
       <div className="app-layout" ref={layoutRef}>
       {/* Sol Panel: Nested Sidebar */}
       <aside className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
-        <div className="sidebar-header">
-          <Link to="/" className="sidebar-title">Projects</Link>
+        <div className="sidebar-top-nav">
+          <Link
+            to="/"
+            className={`sidebar-nav-item ${location.pathname === '/' ? 'is-active' : ''}`}
+            title="Projects overview"
+          >
+            <LayoutGrid size={16} className="node-icon" />
+            <span className="item-text">Projects</span>
+            {projectsQuery.data && projectsQuery.data.length > 0 && (
+              <span className="sidebar-badge">{projectsQuery.data.length}</span>
+            )}
+          </Link>
           <button
             className="add-btn"
             type="button"

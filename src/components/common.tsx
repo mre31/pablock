@@ -2,7 +2,16 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { errorMessage, type Diff } from '../api';
 import { AppIcon } from './AppIcon';
-export function Brand() { return <div className="brand"><span className="brand-icon"><AppIcon size={30} /></span><strong>pablock<span className="brand-dot">.</span></strong></div>; }
+export function Brand({ size = 48 }: { size?: number }) {
+  return (
+    <div className="brand">
+      <span className="brand-icon">
+        <AppIcon size={size} invert />
+      </span>
+      <strong>pablock<span className="brand-dot">.</span></strong>
+    </div>
+  );
+}
 export function Modal({title,children,onClose}:{title:string;children:ReactNode;onClose:()=>void}) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(()=>{ const el=dialog.current!; el.showModal(); return ()=>el.close(); },[]);

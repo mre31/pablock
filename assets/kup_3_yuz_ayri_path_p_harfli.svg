@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <!-- Background -->
+  <rect width="1200" height="1200" fill="#000000"/>
+
+  <!--
+    Cube split into 3 separate faces.
+    Each face is its own PATH:
+      1) top-face
+      2) left-face
+      3) right-face
+    Plus a separate path for the "P" mark.
+  -->
+
+  <!-- Top face -->
+  <path id="top-face"
+        d="M 600 220 L 920 405 L 600 590 L 280 405 Z"
+        fill="#11161d"
+        stroke="#f2f2f2"
+        stroke-width="10"
+        stroke-linejoin="round"/>
+
+  <!-- Left face -->
+  <path id="left-face"
+        d="M 280 405 L 600 590 L 600 995 L 280 810 Z"
+        fill="#06090d"
+        stroke="#f2f2f2"
+        stroke-width="10"
+        stroke-linejoin="round"/>
+
+  <!-- Right face -->
+  <path id="right-face"
+        d="M 920 405 L 600 590 L 600 995 L 920 810 Z"
+        fill="#090d12"
+        stroke="#f2f2f2"
+        stroke-width="10"
+        stroke-linejoin="round"/>
+
+  <!-- Stylized P mark on the left/front face -->
+  <path id="p-mark"
+        d="
+          M 405 625
+          C 405 608, 419 594, 436 594
+          L 470 594
+          C 528 594, 570 636, 570 690
+          C 570 746, 526 787, 470 787
+          L 448 787
+          L 448 852
+          C 448 869, 434 883, 417 883
+          C 400 883, 386 869, 386 852
+          L 386 644
+          C 386 633, 393 625, 405 625
+          Z
+
+          M 448 656
+          L 448 725
+          L 470 725
+          C 491 725, 507 710, 507 690
+          C 507 671, 492 656, 470 656
+          Z
+        "
+        fill="#f5f5f5"/>
+
+</svg>

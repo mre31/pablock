@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="820" viewBox="0 0 1000 820">
+  <defs>
+    <style>
+      .edge { stroke:#111; stroke-width:8; stroke-linecap:round; stroke-linejoin:round; fill:none; }
+      .guide { stroke:#777; stroke-width:2.5; stroke-dasharray:10 10; fill:none; }
+      .arc { stroke:#d22; stroke-width:4; fill:none; }
+      .label { font-family:Arial,Helvetica,sans-serif; font-size:30px; fill:#111; }
+      .small { font-family:Arial,Helvetica,sans-serif; font-size:24px; fill:#555; }
+      .red { fill:#d22; font-weight:700; }
+      .face-top { fill:#e8ebef; }
+      .face-left { fill:#cfd4da; }
+      .face-right { fill:#b9c0c8; }
+    </style>
+  </defs>
+
+  <!-- Standard isometric cube: Z rotation 45°, tilt ≈35.264° -->
+  <!-- Key points -->
+  <!-- top=(500,100), left=(250,244.338), right=(750,244.338), front=(500,388.675), bottom=(500,700) -->
+
+  <polygon class="face-top" points="500,100 750,244.338 500,388.675 250,244.338"/>
+  <polygon class="face-left" points="250,244.338 500,388.675 500,700 250,555.663"/>
+  <polygon class="face-right" points="750,244.338 500,388.675 500,700 750,555.663"/>
+
+  <polyline class="edge" points="500,100 750,244.338 500,388.675 250,244.338 500,100"/>
+  <polyline class="edge" points="250,244.338 250,555.663 500,700 750,555.663 750,244.338"/>
+  <line class="edge" x1="500" y1="388.675" x2="500" y2="700"/>
+
+  <!-- Horizontal guides -->
+  <line class="guide" x1="120" y1="244.338" x2="880" y2="244.338"/>
+  <line class="guide" x1="500" y1="55" x2="500" y2="755"/>
+
+  <!-- 30° guide arcs at left/right top corners -->
+  <path class="arc" d="M 315 244.338 A 65 65 0 0 0 306.292 211.838"/>
+  <text class="label red" x="320" y="220">30°</text>
+
+  <path class="arc" d="M 685 244.338 A 65 65 0 0 1 693.708 211.838"/>
+  <text class="label red" x="625" y="220">30°</text>
+
+  <!-- 120° angle at front junction between left-top edge and vertical edge -->
+  <path class="arc" d="M 430.718 348.675 A 80 80 0 0 0 500 468.675"/>
+  <text class="label red" x="398" y="452">120°</text>
+
+  <!-- 120° angle between the two top edges at front junction -->
+  <path class="arc" d="M 430.718 348.675 A 80 80 0 0 1 569.282 348.675"/>
+  <text class="label red" x="468" y="325">120°</text>
+
+  <!-- Angle labels / notes -->
+  <text class="label" x="75" y="70">İzometrik küp açı rehberi</text>
+  <text class="small" x="75" y="108">2B projeksiyonda eğik kenarlar yataya göre ±30°, görünür üç ana eksen birbirine 120°.</text>
+  <text class="small" x="75" y="776">3B kamera kurulumu: Z ekseninde 45° döndürme + yaklaşık 35.264° eğim + ortografik projeksiyon.</text>
+</svg>

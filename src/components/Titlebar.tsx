@@ -36,7 +36,7 @@ export function Titlebar() {
       {isTauri && <WindowResizeHandles />}
       <div className="window-titlebar" data-tauri-drag-region>
         <div className="titlebar-left" data-tauri-drag-region>
-          <AppIcon size={14} className="titlebar-icon" />
+          <AppIcon size={14} className="titlebar-icon" invert />
           <span className="titlebar-title">Pablock</span>
         </div>
 
